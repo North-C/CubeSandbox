@@ -683,6 +683,7 @@ fn vmm_thread_rules(
         (libc::SYS_unshare, vec![]),
         (libc::SYS_utimensat, vec![]),
         // to support operations in init_backendfs()
+        #[cfg(not(target_arch = "aarch64"))]
         (libc::SYS_lstat, vec![]),
         // Async log.
         (libc::SYS_sched_yield, vec![]),
