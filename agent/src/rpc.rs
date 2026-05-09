@@ -1823,6 +1823,13 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         moniclock::Clock::new().elapsed().as_millis()
     );
 
+    notify_hypervisor_agent_started();
+
+    Ok(server)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn notify_hypervisor_agent_started() {
     let port: u16 = 0x680;
     let data: u8 = 0x8;
     unsafe {
@@ -1833,8 +1840,14 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
     unsafe {
         ioport.write(data);
     }
+}
 
-    Ok(server)
+#[cfg(not(target_arch = "x86_64"))]
+fn notify_hypervisor_agent_started() {
+    debug!(
+        sl!(),
+        "x86 I/O port startup notification is not supported on this architecture"
+    );
 }
 
 // This function updates the container namespaces configuration based on the

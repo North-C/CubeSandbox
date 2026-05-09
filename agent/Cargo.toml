@@ -5,9 +5,6 @@ authors = ["The Kata Containers community <kata-dev@lists.katacontainers.io>"]
 edition = "2021"
 
 [dependencies]
-x86_64 = { version = "0.14.2", default-features = false, features = [
-    "instructions",
-] }
 moniclock = "0.1.0"
 oci = { path = "libs/oci" }
 rustjail = { path = "rustjail" }
@@ -70,6 +67,12 @@ serde = { version = "1.0.129", features = ["derive"] }
 toml = "0.5.8"
 clap = { version = "3.0.1", features = ["derive"] }
 base64 = "0.22.1"
+
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+x86_64 = { version = "0.14.2", default-features = false, features = [
+    "instructions",
+] }
+
 [dev-dependencies]
 tempfile = "3.1.0"
 
