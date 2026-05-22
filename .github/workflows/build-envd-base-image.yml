@@ -2,7 +2,6 @@ name: Build envd Base Image
 
 on:
   push:
-    branches: [master]
     paths:
       - 'docker/Dockerfile.cube-base'
       - 'docker/cube-entrypoint.sh'
@@ -31,6 +30,14 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+          - platform: linux/arm64
+            arch: arm64
     permissions:
       contents: read
       packages: write
@@ -45,6 +52,9 @@ jobs:
           envd_ref="${{ github.event.inputs.envd_ref || env.ENVD_REF_DEFAULT }}"
           echo "envd_ref=${envd_ref}" >> "${GITHUB_OUTPUT}"
           echo "Compiling envd from e2b-dev/infra@${envd_ref}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -63,10 +73,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }}-${{ env.BASE_OS_TAG_SUFFIX }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=raw,value=latest,enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
-            type=sha,prefix=sha-,format=short
+            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }}-${{ matrix.arch }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+            type=raw,value=${{ steps.meta_ref.outputs.envd_ref }}-${{ env.BASE_OS_TAG_SUFFIX }}-${{ matrix.arch }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+            type=raw,value=latest-${{ matrix.arch }},enable=${{ github.repository == 'TencentCloud/CubeSandbox' && github.ref == 'refs/heads/master' }}
+            type=sha,prefix=sha-${{ matrix.arch }}-,format=short
           labels: |
             io.cubesandbox.envd.ref=${{ steps.meta_ref.outputs.envd_ref }}
 
@@ -75,10 +85,10 @@ jobs:
         with:
           context: docker
           file: docker/Dockerfile.cube-base
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: false
           load: true
-          tags: cubesandbox-base:ci-smoke
+          tags: cubesandbox-base:ci-smoke-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             ENVD_REF=${{ steps.meta_ref.outputs.envd_ref }}
@@ -88,7 +98,7 @@ jobs:
       - name: Smoke test envd /health
         run: |
           set -euo pipefail
-          cid="$(docker run -d --rm cubesandbox-base:ci-smoke)"
+          cid="$(docker run -d --rm cubesandbox-base:ci-smoke-${{ matrix.arch }})"
           trap 'docker rm -f "${cid}" >/dev/null 2>&1 || true' EXIT
 
           ok=""
@@ -119,7 +129,7 @@ jobs:
         with:
           context: docker
           file: docker/Dockerfile.cube-base
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

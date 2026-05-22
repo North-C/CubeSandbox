@@ -11,6 +11,7 @@ require_cmd sed
 NETWORK_AGENT_BIN="${TOOLBOX_ROOT}/network-agent/bin/network-agent"
 NETWORK_AGENT_CFG="${TOOLBOX_ROOT}/network-agent/network-agent.yaml"
 NETWORK_AGENT_STATE_DIR="${TOOLBOX_ROOT}/network-agent/state"
+NETWORK_AGENT_HEALTH_ADDR="${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}"
 CUBELET_BIN="${TOOLBOX_ROOT}/Cubelet/bin/cubelet"
 CUBELET_CONFIG="${TOOLBOX_ROOT}/Cubelet/config/config.toml"
 CUBELET_DYNAMICCONF="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
@@ -50,15 +51,16 @@ mkdir -p \
 
 start_with_pidfile \
   "network-agent" \
-  "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\""
+  "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\" --health-listen \"${NETWORK_AGENT_HEALTH_ADDR}\""
+
+wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/healthz" 60 2 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
+wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" 60 2 || die "network-agent readyz did not become ready, check logs under ${LOG_DIR}"
 
 start_with_pidfile \
   "cubelet" \
   "export CUBE_SANDBOX_NODE_IP=\"${CUBE_SANDBOX_NODE_IP}\"; \"${CUBELET_BIN}\" --config \"${CUBELET_CONFIG}\" --dynamic-conf-path \"${CUBELET_DYNAMICCONF}\""
 
 refresh_pidfile_from_pattern "cubelet" "^${CUBELET_BIN} --config" 10 1 || log "cubelet pidfile refresh skipped"
-
-wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR:-127.0.0.1:19090}/healthz" 30 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
 for _ in {1..30}; do
   if "${SCRIPT_DIR}/quickcheck.sh" >/dev/null 2>&1; then

@@ -2,7 +2,6 @@ name: Hypervisor Tests (x86-64)
 
 on:
   push:
-    branches: [master]
     paths:
       - 'hypervisor/**'
       - '.github/workflows/hypervisor-integration.yaml'

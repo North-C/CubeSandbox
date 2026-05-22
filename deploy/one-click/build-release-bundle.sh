@@ -27,8 +27,13 @@ CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
 MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
-CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
-KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
+TARGET_ARCH="$(one_click_target_arch)"
+TARGET_PLATFORM="$(one_click_platform)"
+PLATFORM_SUFFIX="$(one_click_platform_suffix)"
+CUBE_KERNEL_DIR_NAME="$(one_click_kernel_dir_name)"
+CUBE_IMAGE_DIR_NAME="$(one_click_image_dir_name)"
+CUBE_KERNEL_VMLINUX="$(one_click_resolve_kernel_vmlinux "${RAW_ARTIFACTS_DIR}")"
+KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/${CUBE_KERNEL_DIR_NAME}.zip"
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-$(latest_git_revision "${ROOT_DIR}")}"
 DIST_ROOT="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}"
 DIST_TAR="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}.tar.gz"
@@ -78,60 +83,21 @@ build_rust_binary() {
   esac
 }
 
-build_or_copy_go_binary() {
-  local name="$1"
-  local override_path="$2"
-  local workdir="$3"
-  local mode="$4"
-  local output="$5"
-  local package="$6"
-
-  if [[ -n "${override_path}" ]]; then
-    log "using prebuilt ${name}: ${override_path}"
-    copy_file "${override_path}" "${output}"
-    return 0
-  fi
-
-  log "building ${name}"
-  build_go_binary "${workdir}" "${mode}" "${output}" "${package}"
-}
-
-build_or_copy_rust_binary() {
-  local name="$1"
-  local override_path="$2"
-  local workdir="$3"
-  local mode="$4"
-  local output="$5"
-
-  if [[ -n "${override_path}" ]]; then
-    log "using prebuilt ${name}: ${override_path}"
-    copy_file "${override_path}" "${output}"
-    return 0
-  fi
-
-  log "building ${name}"
-  build_rust_binary "${workdir}" "${mode}" "${name}" "${output}"
-}
-
 package_kernel_artifact_zip() {
   local src_vmlinux="$1"
   local output_zip="$2"
-  local src_pvm_vmlinux="${3:-}"
   require_cmd python3
-  python3 - "${src_vmlinux}" "${output_zip}" "${src_pvm_vmlinux}" <<'PY'
+  python3 - "${src_vmlinux}" "${output_zip}" <<'PY'
 import os
 import sys
 import zipfile
 
 src_path = sys.argv[1]
 zip_path = sys.argv[2]
-pvm_src_path = sys.argv[3] if len(sys.argv) > 3 else ""
 
 os.makedirs(os.path.dirname(zip_path), exist_ok=True)
 with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     zf.write(src_path, arcname="vmlinux")
-    if pvm_src_path and os.path.isfile(pvm_src_path):
-        zf.write(pvm_src_path, arcname="vmlinux-pvm")
 PY
 }
 
@@ -163,41 +129,62 @@ ensure_dir "${CUBE_WEBUI_TEMPLATE_DIR}"
 ensure_dir "${CUBE_PROXY_SOURCE_DIR}"
 
 log "building runtime layout"
-"${SCRIPT_DIR}/build-vm-assets.sh"
+ONE_CLICK_TARGET_ARCH="${TARGET_ARCH}" "${SCRIPT_DIR}/build-vm-assets.sh"
 
-log "packaging fixed kernel artifact zip"
-package_kernel_artifact_zip \
-  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux" \
-  "${KERNEL_ARTIFACT_ZIP}" \
-  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
+log "packaging fixed kernel artifact zip for ${TARGET_PLATFORM}"
+one_click_validate_kernel_vmlinux "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}/vmlinux" "${TARGET_ARCH}"
+package_kernel_artifact_zip "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}/vmlinux" "${KERNEL_ARTIFACT_ZIP}"
 
 rm -rf "${CORE_BIN_DIR}" "${PACKAGE_ROOT}" "${PACKAGE_TAR}" "${DIST_ROOT}" "${DIST_TAR}"
 mkdir -p "${CORE_BIN_DIR}"
 
-build_or_copy_go_binary \
-  "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubemaster" ./cmd/cubemaster
-build_or_copy_go_binary \
-  "cubemastercli" "${CUBEMASTERCLI_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli
-build_or_copy_go_binary \
-  "cubelet" "${CUBELET_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubelet" ./cmd/cubelet
-build_or_copy_go_binary \
-  "cubecli" "${CUBECLI_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cubecli" ./cmd/cubecli
-build_or_copy_rust_binary \
-  "cube-api" "${API_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/cube-api"
-build_or_copy_go_binary \
-  "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
-  "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
-  "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent
+if [[ -z "${CUBEMASTER_BIN_OVERRIDE}" ]]; then
+  log "building cubemaster"
+  build_go_binary "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" "${CORE_BIN_DIR}/cubemaster" ./cmd/cubemaster
+else
+  log "using prebuilt cubemaster: ${CUBEMASTER_BIN_OVERRIDE}"
+  copy_file "${CUBEMASTER_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubemaster"
+fi
+
+if [[ -z "${CUBEMASTERCLI_BIN_OVERRIDE}" ]]; then
+  log "building cubemastercli"
+  build_go_binary "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli
+else
+  log "using prebuilt cubemastercli: ${CUBEMASTERCLI_BIN_OVERRIDE}"
+  copy_file "${CUBEMASTERCLI_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubemastercli"
+fi
+
+if [[ -z "${CUBELET_BIN_OVERRIDE}" ]]; then
+  log "building cubelet"
+  build_go_binary "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" "${CORE_BIN_DIR}/cubelet" ./cmd/cubelet
+else
+  log "using prebuilt cubelet: ${CUBELET_BIN_OVERRIDE}"
+  copy_file "${CUBELET_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubelet"
+fi
+
+if [[ -z "${CUBECLI_BIN_OVERRIDE}" ]]; then
+  log "building cubecli"
+  build_go_binary "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" "${CORE_BIN_DIR}/cubecli" ./cmd/cubecli
+else
+  log "using prebuilt cubecli: ${CUBECLI_BIN_OVERRIDE}"
+  copy_file "${CUBECLI_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cubecli"
+fi
+
+if [[ -z "${API_BIN_OVERRIDE}" ]]; then
+  log "building cube-api"
+  build_rust_binary "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" "cube-api" "${CORE_BIN_DIR}/cube-api"
+else
+  log "using prebuilt cube-api: ${API_BIN_OVERRIDE}"
+  copy_file "${API_BIN_OVERRIDE}" "${CORE_BIN_DIR}/cube-api"
+fi
+
+if [[ -z "${NETWORK_AGENT_BIN_OVERRIDE}" ]]; then
+  log "building network-agent"
+  build_go_binary "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent
+else
+  log "using prebuilt network-agent: ${NETWORK_AGENT_BIN_OVERRIDE}"
+  copy_file "${NETWORK_AGENT_BIN_OVERRIDE}" "${CORE_BIN_DIR}/network-agent"
+fi
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
@@ -244,14 +231,20 @@ copy_dir_contents "${CUBE_PROXY_TEMPLATE_DIR}" "${PACKAGE_ROOT}/cubeproxy"
 copy_dir_contents "${CUBE_COREDNS_TEMPLATE_DIR}" "${PACKAGE_ROOT}/coredns"
 copy_dir_contents "${CUBE_WEBUI_TEMPLATE_DIR}" "${PACKAGE_ROOT}/webui"
 copy_dir_contents "${CUBE_PROXY_SOURCE_DIR}" "${PACKAGE_ROOT}/cubeproxy/build-context"
-rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
+copy_file "${CUBE_PROXY_TEMPLATE_DIR}/Dockerfile.oneclick" "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile.oneclick"
+rm -f \
+  "${PACKAGE_ROOT}/cubeproxy/Dockerfile.oneclick" \
+  "${PACKAGE_ROOT}/cubeproxy/build-context/Dockerfile" \
+  "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
 
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
-copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
-copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
+copy_dir_contents "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}" "${PACKAGE_ROOT}/${CUBE_KERNEL_DIR_NAME}"
+copy_dir_contents "${RUNTIME_LAYOUT_DIR}/${CUBE_IMAGE_DIR_NAME}" "${PACKAGE_ROOT}/${CUBE_IMAGE_DIR_NAME}"
+ln -sfn "${CUBE_KERNEL_DIR_NAME}" "${PACKAGE_ROOT}/cube-kernel-scf"
+ln -sfn "${CUBE_IMAGE_DIR_NAME}" "${PACKAGE_ROOT}/cube-image"
 
 copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/sql" "${PACKAGE_ROOT}/sql"
@@ -272,7 +265,10 @@ copy_file "${SCRIPT_DIR}/online-install.sh" "${DIST_ROOT}/online-install.sh"
 copy_file "${SCRIPT_DIR}/env.example" "${DIST_ROOT}/env.example"
 copy_file "${SCRIPT_DIR}/lib/common.sh" "${DIST_ROOT}/lib/common.sh"
 copy_file "${PACKAGE_TAR}" "${DIST_ROOT}/assets/package/sandbox-package.tar.gz"
-copy_file "${KERNEL_ARTIFACT_ZIP}" "${DIST_ROOT}/assets/kernel-artifacts/cube-kernel-scf.zip"
+copy_file "${KERNEL_ARTIFACT_ZIP}" "${DIST_ROOT}/assets/kernel-artifacts/${CUBE_KERNEL_DIR_NAME}.zip"
+link_file_or_copy \
+  "${DIST_ROOT}/assets/kernel-artifacts/${CUBE_KERNEL_DIR_NAME}.zip" \
+  "${DIST_ROOT}/assets/kernel-artifacts/cube-kernel-scf.zip"
 chmod +x \
   "${DIST_ROOT}/install.sh" \
   "${DIST_ROOT}/install-compute.sh" \

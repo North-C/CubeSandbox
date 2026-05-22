@@ -3,7 +3,7 @@ import { withMermaid } from 'vitepress-plugin-mermaid'
 
 export default withMermaid(defineConfig({
   title: "Cube Sandbox",
-  description: "Instant, Concurrent, Secure & Lightweight Sandbox Service for AI Agents",
+  description: "Production-grade, multi-component security sandbox system for serverless computing.",
   
   themeConfig: {
     socialLinks: [
@@ -20,8 +20,6 @@ export default withMermaid(defineConfig({
           { text: 'Home', link: '/' },
           { text: 'Guide', link: '/guide/introduction' },
           { text: 'Architecture', link: '/architecture/overview' },
-          { text: 'About us', link: '/about-us' },
-          { text: 'Changelog', link: '/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -33,7 +31,6 @@ export default withMermaid(defineConfig({
                 { text: 'Quick Start', link: '/guide/quickstart' },
                 { text: 'Self-Build Deployment', link: '/guide/self-build-deploy' },
                 { text: 'Multi-Node Cluster', link: '/guide/multi-node-deploy' },
-                { text: 'PVM Deployment', link: '/guide/pvm-deploy' },
                 { text: 'Development Environment (QEMU VM)', link: '/guide/dev-environment' }
               ]
             },
@@ -83,14 +80,12 @@ export default withMermaid(defineConfig({
       lang: 'zh',
       link: '/zh/',
       title: 'Cube Sandbox',
-      description: '一个极速启动、高并发、安全且轻量化的 AI Agent 沙箱服务',
+      description: '专为 Serverless 计算设计的生产级多组件安全沙箱系统。',
       themeConfig: {
         nav: [
           { text: '首页', link: '/zh/' },
           { text: '指南', link: '/zh/guide/introduction' },
           { text: '架构', link: '/zh/architecture/overview' },
-          { text: '关于我们', link: '/zh/about-us' },
-          { text: '更新日志', link: '/zh/changelog' },
           { text: 'GitHub', link: 'https://github.com/tencentcloud/CubeSandbox' }
         ],
         sidebar: {
@@ -102,7 +97,6 @@ export default withMermaid(defineConfig({
                 { text: '快速开始', link: '/zh/guide/quickstart' },
                 { text: '本地构建部署', link: '/zh/guide/self-build-deploy' },
                 { text: '多机集群部署', link: '/zh/guide/multi-node-deploy' },
-                { text: 'PVM部署', link: '/zh/guide/pvm-deploy' },
                 { text: '开发环境（QEMU 虚机）', link: '/zh/guide/dev-environment' }
               ]
             },

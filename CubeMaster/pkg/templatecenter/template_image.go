@@ -1425,35 +1425,28 @@ func buildRootfsArtifact(ctx context.Context, record *models.RootfsArtifact, req
 }
 
 func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageReq, downloadBaseURL string) (*resolvedSourceImage, error) {
-	var (
-		dockerConfigDir    string
-		imageExistsLocally bool
-		inspectOutput      []byte
-		err                error
-	)
-	inspectOutput, err = dockerOutput(ctx, "", "image", "inspect", req.SourceImageRef)
-	if err == nil {
-		imageExistsLocally = true
+	dockerConfigDir := ""
+	imageExistedLocally := false
+	if _, err := dockerOutput(ctx, "", "image", "inspect", req.SourceImageRef); err == nil {
+		imageExistedLocally = true
 	}
-	if !imageExistsLocally {
-		if req.RegistryUsername != "" || req.RegistryPassword != "" {
-			tmpDir, err := os.MkdirTemp("", "cubemaster-docker-config-*")
-			if err != nil {
-				return nil, err
-			}
-			dockerConfigDir = tmpDir
-			defer os.RemoveAll(tmpDir)
-			if err := dockerLogin(ctx, dockerConfigDir, req.SourceImageRef, req.RegistryUsername, req.RegistryPassword); err != nil {
-				return nil, err
-			}
-		}
-		if err := dockerRun(ctx, dockerConfigDir, "pull", req.SourceImageRef); err != nil {
-			return nil, fmt.Errorf("docker pull %s failed: %w", req.SourceImageRef, err)
-		}
-		inspectOutput, err = dockerOutput(ctx, dockerConfigDir, "image", "inspect", req.SourceImageRef)
+	if req.RegistryUsername != "" || req.RegistryPassword != "" {
+		tmpDir, err := os.MkdirTemp("", "cubemaster-docker-config-*")
 		if err != nil {
-			return nil, fmt.Errorf("docker image inspect %s failed: %w", req.SourceImageRef, err)
+			return nil, err
 		}
+		dockerConfigDir = tmpDir
+		defer os.RemoveAll(tmpDir)
+		if err := dockerLogin(ctx, dockerConfigDir, req.SourceImageRef, req.RegistryUsername, req.RegistryPassword); err != nil {
+			return nil, err
+		}
+	}
+	if err := dockerRun(ctx, dockerConfigDir, "pull", req.SourceImageRef); err != nil {
+		return nil, fmt.Errorf("docker pull %s failed: %w", req.SourceImageRef, err)
+	}
+	inspectOutput, err := dockerOutput(ctx, dockerConfigDir, "image", "inspect", req.SourceImageRef)
+	if err != nil {
+		return nil, fmt.Errorf("docker image inspect %s failed: %w", req.SourceImageRef, err)
 	}
 	var inspectList []dockerInspectImage
 	if err := json.Unmarshal(inspectOutput, &inspectList); err != nil {
@@ -1474,7 +1467,7 @@ func prepareSourceImage(ctx context.Context, req *types.CreateTemplateFromImageR
 			if dockerConfigDir != "" {
 				_ = os.RemoveAll(dockerConfigDir)
 			}
-			if !imageExistsLocally {
+			if !imageExistedLocally {
 				_ = dockerRun(cleanupCtx, "", "image", "rm", "-f", req.SourceImageRef)
 			}
 		},

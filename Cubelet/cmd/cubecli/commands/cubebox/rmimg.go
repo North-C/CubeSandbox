@@ -6,7 +6,6 @@ package cubebox
 
 import (
 	gocontext "context"
-	"log"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
@@ -22,7 +21,7 @@ var (
 func removeImage(context *cli.Context, imageRef string) error {
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("removeImage panic: %+v", r)
+			myPrint("removeImage panic: %+v", r)
 			return
 		}
 	}()
@@ -32,7 +31,7 @@ func removeImage(context *cli.Context, imageRef string) error {
 
 	named, err := refdocker.ParseDockerRef(imageRef)
 	if err != nil {
-		log.Printf("failed to parse image ref: %+v", err)
+		myPrint("failed to parse image ref: %+v", err)
 		return err
 	}
 	ref := named.String()
@@ -42,9 +41,9 @@ func removeImage(context *cli.Context, imageRef string) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("image %q remove succ", ref)
+		myPrint("image %q remove succ", ref)
 	} else {
-		log.Printf("no such image %q", ref)
+		myPrint("no such image %q", ref)
 	}
 	return nil
 }

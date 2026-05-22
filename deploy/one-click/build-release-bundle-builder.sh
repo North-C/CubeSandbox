@@ -59,7 +59,16 @@ echo "[one-click] building network-agent in builder" >&2
 
 echo "[one-click] building cube-agent in builder" >&2
 (cd /workspace/agent && make -j1)
-install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
+agent_bin="$(
+  cd /workspace/agent
+  make --no-print-directory print-target-path 2>/dev/null || \
+    find target -path '*/release/cube-agent' -type f -perm /111 | sort | head -1
+)"
+if [ -z "${agent_bin}" ] || [ ! -f "/workspace/agent/${agent_bin}" ]; then
+  echo "cube-agent build output not found" >&2
+  exit 1
+fi
+install -m 0755 "/workspace/agent/${agent_bin}" "${PREBUILT_DIR}/cube-agent"
 
 echo "[one-click] building shim workspace in builder" >&2
 (cd /workspace/CubeShim && cargo build --release --locked)
@@ -94,6 +103,7 @@ do
 done
 
 log "packaging one-click release bundle on host with prebuilt artifacts"
+ONE_CLICK_TARGET_ARCH="$(one_click_target_arch)" \
 ONE_CLICK_CUBEMASTER_BIN="${PREBUILT_DIR}/cubemaster" \
 ONE_CLICK_CUBEMASTERCLI_BIN="${PREBUILT_DIR}/cubemastercli" \
 ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \

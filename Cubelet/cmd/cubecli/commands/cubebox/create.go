@@ -6,7 +6,7 @@ package cubebox
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"os"
 	"time"
 
@@ -45,52 +45,57 @@ var Create = &cli.Command{
 
 		for _, arg := range context.Args().Slice() {
 			client := cubebox.NewCubeboxMgrClient(conn)
-			log.Printf("start create sandbox request file:%v", arg)
+			myPrint("start create sandbox request file:%v", arg)
 			req, err := readRunSandboxReqFromFile(arg)
 			if err != nil {
-				log.Printf("failed to read req file: %v", err)
+				myPrint("failed to read req file: %v", err)
 				os.Exit(1)
 			}
 			req.RequestID = uuid.New().String()
 
 			reqb, _ := json.Marshal(req)
-			log.Printf("send create sandbox request: %s", string(reqb))
+			myPrint("send create sandbox request: %s", string(reqb))
 			rsp, err := client.Create(ctx, req)
 			if err != nil {
-				log.Printf("create failure:%v", err)
+				myPrint("create failure:%v", err)
 				os.Exit(1)
 			}
 			respStr, err := jsoniter.MarshalToString(rsp)
 			if err != nil {
-				log.Printf("failed to marshal resp: %v", err)
+				myPrint("failed to marshal resp: %v", err)
 				os.Exit(1)
 			}
-			log.Printf("create sandbox rspesponse: %s", respStr)
+			myPrint("create sandbox rspesponse: %s", respStr)
 			if rsp.Ret.RetCode == errorcode.ErrorCode_Success {
-				log.Printf("create sandbox %s success", rsp.SandboxID)
+				myPrint("create sandbox %s success", rsp.SandboxID)
 				if context.Bool("rm") {
 					duration := context.Duration("sleep")
-					log.Printf("sleep %v before destroy sandbox %s", duration, rsp.SandboxID)
+					myPrint("sleep %v before destroy sandbox %s", duration, rsp.SandboxID)
 					time.Sleep(duration)
 					req := &cubebox.DestroyCubeSandboxRequest{
 						RequestID: uuid.New().String(),
 						SandboxID: rsp.SandboxID,
 					}
-					log.Printf("start destroy sandbox %s", rsp.SandboxID)
+					myPrint("start destroy sandbox %s", rsp.SandboxID)
 					rsp, err := client.Destroy(ctx, req)
 					if err != nil {
-						log.Printf("destroy sandbox failure:%v", err)
+						myPrint("destroy sandbox failure:%v", err)
 						return err
 					}
-					log.Printf("destroy sandbox rsp:%v", rsp)
+					myPrint("destroy sandbox rsp:%v\n", rsp)
 				} else {
-					log.Printf("skip to destroy sandbox, use -rm to remove sandbox")
+					myPrint("skip to destroy sandbox, use -rm to remove sandbox")
 				}
 			} else {
-				log.Printf("create sandbox failure:%v: %v", rsp.Ret.RetCode, rsp.Ret.RetMsg)
+				myPrint("create sandbox failure:%v: %v", rsp.Ret.RetCode, rsp.Ret.RetMsg)
 				os.Exit(127)
 			}
 		}
 		return nil
 	},
+}
+
+func myPrint(format string, a ...interface{}) {
+	fmt.Printf("%v,"+format+"\n",
+		append([]interface{}{fmt.Sprintf("%v", time.Now().Format(time.RFC3339Nano))}, a...)...)
 }

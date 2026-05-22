@@ -2,7 +2,6 @@ name: Build Check
 
 on:
   push:
-    branches: [master]
     paths:
       - 'CubeAPI/**'
       - 'CubeMaster/**'
@@ -83,7 +82,7 @@ jobs:
               mkdir -p /workspace/_output/bin &&
               cd /workspace/agent &&
               make -j1 &&
-              install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent /workspace/_output/bin/cube-agent
+              install -m 0755 "$(make --no-print-directory print-target-path)" /workspace/_output/bin/cube-agent
             expected_bins: |
               _output/bin/cube-agent
           - component: CubeShim

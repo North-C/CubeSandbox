@@ -118,6 +118,10 @@ endef
 ##TARGET default: build code
 default: $(TARGET) show-header
 
+##TARGET print-target-path: print built cube-agent path for current build options
+print-target-path:
+	@printf '%s\n' '$(TARGET_PATH)'
+
 $(TARGET): $(GENERATED_CODE) logging-crate-tests $(TARGET_PATH)
 
 logging-crate-tests:

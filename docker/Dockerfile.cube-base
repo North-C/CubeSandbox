@@ -5,7 +5,7 @@
 # and can be turned into Cube templates without any extra wiring.
 #
 # envd is compiled from e2b-dev/infra@${ENVD_REF} in a builder stage,
-# producing a static linux/amd64 binary that is copied into the final
+# producing a static linux/${TARGETARCH} binary that is copied into the final
 # ubuntu:22.04 runtime stage alongside a generic entrypoint.
 #
 # Build example:
@@ -16,30 +16,54 @@
 
 ARG ENVD_REF=2026.16
 ARG GO_VERSION=1.25.4
+ARG GO_MODULE_PROXY=https://goproxy.cn,direct
 ARG UBUNTU_VERSION=22.04
+ARG TARGETARCH
+ARG DEBIAN_PRIMARY_MIRROR=
+ARG DEBIAN_SECURITY_MIRROR=
+ARG UBUNTU_PRIMARY_MIRROR=
+ARG UBUNTU_SECURITY_MIRROR=
 
 # -------- Stage 1: compile envd from e2b-dev/infra --------
 FROM golang:${GO_VERSION}-bookworm AS envd-builder
 
 ARG ENVD_REF
 ARG ENVD_UPSTREAM_REPO=https://github.com/e2b-dev/infra.git
+ARG TARGETARCH
+ARG GO_MODULE_PROXY
+ARG DEBIAN_PRIMARY_MIRROR
+ARG DEBIAN_SECURITY_MIRROR
 
-RUN apt-get update \
+RUN set -eux; \
+    if [ -n "${DEBIAN_PRIMARY_MIRROR}" ]; then \
+        sed -i "s|http://deb.debian.org/debian|${DEBIAN_PRIMARY_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    if [ -n "${DEBIAN_SECURITY_MIRROR}" ]; then \
+        sed -i "s|http://deb.debian.org/debian-security|${DEBIAN_SECURITY_MIRROR}|g" /etc/apt/sources.list.d/debian.sources; \
+    fi; \
+    apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
     && apt-get install -y --no-install-recommends git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src
 
-# Shallow-clone the upstream tag.
-RUN git clone --depth 1 --branch "${ENVD_REF}" "${ENVD_UPSTREAM_REPO}" infra
+COPY envd-source/ /tmp/envd-source/
+
+# Prefer a pre-seeded source tree when remote git access is unreliable.
+RUN set -eux; \
+    if [ -d /tmp/envd-source/infra/packages/envd ]; then \
+        cp -a /tmp/envd-source/infra /src/infra; \
+    else \
+        git clone --depth 1 --branch "${ENVD_REF}" "${ENVD_UPSTREAM_REPO}" infra; \
+    fi; \
+    rm -rf /tmp/envd-source
 
 WORKDIR /src/infra/packages/envd
 
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
+RUN commit_sha="$(git -C /src/infra rev-parse --short HEAD)" \
+    && target_arch="${TARGETARCH:-$(go env GOARCH)}" \
     && echo "Building envd from ${ENVD_UPSTREAM_REPO}@${ENVD_REF} (commit=${commit_sha})" \
-    && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    && GOPROXY="${GO_MODULE_PROXY}" CGO_ENABLED=0 GOOS=linux GOARCH="${target_arch}" \
        go build -a \
            -ldflags "-X=main.commitSHA=${commit_sha} -s -w" \
            -o /out/envd \
@@ -53,13 +77,22 @@ FROM ubuntu:${UBUNTU_VERSION}
 
 ARG ENVD_REF
 ARG DEBIAN_FRONTEND=noninteractive
+ARG UBUNTU_PRIMARY_MIRROR
+ARG UBUNTU_SECURITY_MIRROR
 
 ENV ENVD_REF=${ENVD_REF} \
     ENVD_PORT=49983 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-RUN apt-get update \
+RUN set -eux; \
+    if [ -n "${UBUNTU_PRIMARY_MIRROR}" ]; then \
+        sed -i "s|http://archive.ubuntu.com/ubuntu|${UBUNTU_PRIMARY_MIRROR}|g" /etc/apt/sources.list; \
+    fi; \
+    if [ -n "${UBUNTU_SECURITY_MIRROR}" ]; then \
+        sed -i "s|http://security.ubuntu.com/ubuntu|${UBUNTU_SECURITY_MIRROR}|g" /etc/apt/sources.list; \
+    fi; \
+    apt-get update -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \

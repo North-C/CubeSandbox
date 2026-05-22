@@ -6,10 +6,8 @@ The steps below boot a **disposable Linux VM** on your development machine (WSL 
 
 ⚠️Follow this guide step by step — you can be up and running with Cube Sandbox in just a few minutes!
 
-::: tip Already have a server with KVM enabled?
-If you already have an x86_64 Linux server with KVM enabled (bare-metal or cloud VM), you can **skip Step 1** and run the Step 2 installer directly on that server.
-
-If you're on an **ordinary cloud VM without KVM**, you don't need bare-metal either — see [PVM Deployment](./pvm-deploy.md) to enable KVM on any standard cloud VM.
+::: tip Already have a bare-metal server?
+If you already have an x86_64 Linux bare-metal server with KVM enabled, you can **skip Step 1** and run the Step 2 installer directly on that server.
 :::
 
 ## Prerequisites
@@ -20,7 +18,6 @@ Any one of the following hosts works:
 - **An x86_64 Linux physical machine**
 - **A Linux VM with nested virtualization enabled** (e.g. Ubuntu 22.04 on VMware with "Virtualize Intel VT-x/EPT or AMD-V/RVI" enabled in the VM's CPU settings)
 - **An x86_64 bare-metal Linux server**
-- **An ordinary cloud VM** (via PVM — no `/dev/kvm` or bare-metal required; see [PVM Deployment](./pvm-deploy.md))
 
 Common requirements:
 
@@ -84,14 +81,12 @@ Create a code-interpreter template from the prebuilt image:
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
-
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
 Then run the following command to monitor the build progress:
 

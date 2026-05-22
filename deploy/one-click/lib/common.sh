@@ -51,12 +51,174 @@ ensure_dir() {
   [[ -d "${path}" ]] || die "required directory not found: ${path}"
 }
 
+one_click_normalize_arch() {
+  local arch="$1"
+  arch="${arch#linux/}"
+  arch="${arch#linux-}"
+  case "${arch}" in
+    amd64|x86_64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported ONE_CLICK_TARGET_ARCH: ${arch}"
+      ;;
+  esac
+}
+
+one_click_host_arch() {
+  local machine
+  machine="$(uname -m)"
+  one_click_normalize_arch "${machine}"
+}
+
+one_click_target_arch() {
+  local arch="${ONE_CLICK_TARGET_ARCH:-${TARGETARCH:-}}"
+  if [[ -z "${arch}" ]]; then
+    arch="$(one_click_host_arch)"
+  fi
+  one_click_normalize_arch "${arch}"
+}
+
+one_click_platform() {
+  printf 'linux/%s\n' "$(one_click_target_arch)"
+}
+
+one_click_platform_suffix() {
+  printf 'linux-%s\n' "$(one_click_target_arch)"
+}
+
+one_click_kernel_dir_name() {
+  printf 'cube-kernel-scf-%s\n' "$(one_click_platform_suffix)"
+}
+
+one_click_image_dir_name() {
+  printf 'cube-image-%s\n' "$(one_click_platform_suffix)"
+}
+
+one_click_resolve_kernel_vmlinux() {
+  local raw_artifacts_dir="$1"
+  local arch_vmlinux="${raw_artifacts_dir}/$(one_click_platform_suffix)/vmlinux"
+  local legacy_vmlinux="${raw_artifacts_dir}/vmlinux"
+
+  if [[ -n "${ONE_CLICK_CUBE_KERNEL_VMLINUX:-}" ]]; then
+    printf '%s\n' "${ONE_CLICK_CUBE_KERNEL_VMLINUX}"
+    return 0
+  fi
+
+  if [[ -f "${arch_vmlinux}" ]]; then
+    printf '%s\n' "${arch_vmlinux}"
+    return 0
+  fi
+
+  if [[ "$(one_click_target_arch)" == "amd64" && -f "${legacy_vmlinux}" ]]; then
+    log "using legacy amd64 kernel artifact path: ${legacy_vmlinux}"
+    printf '%s\n' "${legacy_vmlinux}"
+    return 0
+  fi
+
+  printf '%s\n' "${arch_vmlinux}"
+}
+
+one_click_file_arch_matches() {
+  local description="$1"
+  local arch="$2"
+
+  case "${arch}" in
+    amd64)
+      [[ "${description}" == *"x86-64"* || "${description}" == *"x86_64"* ]]
+      ;;
+    arm64)
+      [[ "${description}" == *"ARM aarch64"* \
+        || "${description}" == *"Aarch64"* \
+        || "${description}" == *"aarch64"* \
+        || "${description}" == *"ARM64"* ]]
+      ;;
+    *)
+      die "unsupported file validation arch: ${arch}"
+      ;;
+  esac
+}
+
+one_click_validate_file_arch() {
+  local path="$1"
+  local label="$2"
+  local arch="${3:-$(one_click_target_arch)}"
+  local description
+
+  ensure_file "${path}"
+  require_cmd file
+
+  description="$(file -L "${path}")"
+  if ! one_click_file_arch_matches "${description}" "${arch}"; then
+    cat >&2 <<EOF
+[one-click] ERROR: ${label} architecture mismatch
+  expected: linux/${arch}
+  file: ${path}
+  detected: ${description}
+EOF
+    exit 1
+  fi
+
+  log "validated ${label} architecture: ${description}"
+}
+
+one_click_validate_kernel_vmlinux() {
+  local path="$1"
+  local arch="${2:-$(one_click_target_arch)}"
+  one_click_validate_file_arch "${path}" "guest kernel vmlinux" "${arch}"
+}
+
+one_click_find_guest_rootfs_arch_probe() {
+  local rootfs_dir="$1"
+  local candidate
+  for candidate in \
+    /bin/sh \
+    /usr/bin/sh \
+    /bin/bash \
+    /usr/bin/bash \
+    /bin/busybox \
+    /usr/bin/busybox \
+    /bin/ls \
+    /usr/bin/ls \
+    /usr/bin/env
+  do
+    if [[ -e "${rootfs_dir}${candidate}" ]]; then
+      printf '%s\n' "${rootfs_dir}${candidate}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+one_click_validate_guest_rootfs_arch() {
+  local rootfs_dir="$1"
+  local arch="${2:-$(one_click_target_arch)}"
+  local probe
+
+  ensure_dir "${rootfs_dir}"
+  probe="$(one_click_find_guest_rootfs_arch_probe "${rootfs_dir}")" || \
+    die "failed to find a guest rootfs executable for architecture validation under ${rootfs_dir}"
+
+  one_click_validate_file_arch "${probe}" "guest rootfs executable" "${arch}"
+}
+
 copy_file() {
   local src="$1"
   local dst="$2"
   ensure_file "${src}"
   mkdir -p "$(dirname "${dst}")"
   cp -f "${src}" "${dst}"
+}
+
+link_file_or_copy() {
+  local src="$1"
+  local dst="$2"
+  ensure_file "${src}"
+  mkdir -p "$(dirname "${dst}")"
+  ln -f "${src}" "${dst}" 2>/dev/null || cp -f "${src}" "${dst}"
 }
 
 copy_dir_contents() {
@@ -315,13 +477,18 @@ ensure_kernel_vmlinux() {
 
   How to fix:
 
-    Option A — Place it in the default location:
+    Option A — Place it in the target-architecture default location:
 
-      cp /path/to/your/vmlinux ${default_dir}/vmlinux
+      mkdir -p ${default_dir}/$(one_click_platform_suffix)
+      cp /path/to/your/vmlinux ${default_dir}/$(one_click_platform_suffix)/vmlinux
 
     Option B — Set a custom path via environment variable:
 
       export ONE_CLICK_CUBE_KERNEL_VMLINUX=/path/to/vmlinux
+
+    Optional:
+
+      export ONE_CLICK_TARGET_ARCH=$(one_click_target_arch)
 
   Then re-run the build script.
 

@@ -6,7 +6,6 @@ package storage
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -48,13 +47,13 @@ var lsdb = &cli.Command{
 		basePath := filepath.Join(context.String("state"), storageDir, "db")
 		clean, err := copyDb(basePath)
 		if err != nil {
-			log.Printf("fail copy db:%v", err)
+			myPrint("fail copy db:%v", err)
 			return err
 		}
 		defer clean()
 		all, err := dbHandle.ReadAll(context.String("bucket"))
 		if err != nil {
-			log.Printf("read db fail:%v", err)
+			myPrint("read db fail:%v", err)
 			return nil
 		}
 		if context.Bool("raw") {
@@ -103,7 +102,7 @@ func copyDb(onlineBaseDir string) (func(), error) {
 
 	exist, er := utils.DenExist(targedir)
 	if er != nil || !exist {
-		log.Printf("failed to create temp dir: %v", er)
+		myPrint("failed to create temp dir: %v", er)
 		return nil, er
 	}
 
@@ -112,19 +111,19 @@ func copyDb(onlineBaseDir string) (func(), error) {
 		{"ls", "-l", onlineBaseDir},
 		{"cp", "-r", onlineBaseDir, targedir},
 	}
-	log.Printf("cmds:%v", cmds)
+	myPrint("cmds:%v", cmds)
 	for _, cmd := range cmds {
 		if out, stderr, err := utils.ExecV(cmd, time.Minute); err == nil {
-			log.Printf("storage copy: %v", out)
+			myPrint("storage copy: %v", out)
 		} else {
-			log.Printf("storage copy: failed to exec %v: %v", cmd, err)
+			myPrint("storage copy: failed to exec %v: %v", cmd, err)
 			return clean, fmt.Errorf("storage failed:%s", stderr)
 		}
 	}
 
 	var err error
 	if dbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, dbDir), "meta.db", 10, nil); err != nil {
-		log.Printf("storage: failed to open db: %v", err)
+		myPrint("storage: failed to open db: %v", err)
 		return clean, err
 	}
 	return clean, nil

@@ -54,14 +54,12 @@ Use the `tpl create-from-image` sub-command to kick off the build job:
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest \
+  --image     ccr.ccs.tencentyun.com/ags-image/sandbox-browser:latest \
   --writable-layer-size 1G \
   --expose-port 9000 \
   --probe 9000 \
   --probe-path /
 ```
-
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest` instead.
 
 On success the CLI immediately prints a `job_id` and a generated
 `template_id` and exits — the build continues **asynchronously** on the
@@ -81,7 +79,7 @@ progress:    0%
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --image     ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
@@ -89,8 +87,6 @@ cubemastercli tpl create-from-image \
   --probe-path /healthz \
   --env        MY_ENV=production
 ```
-
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
 ---
 

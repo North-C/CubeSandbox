@@ -8,7 +8,6 @@ import (
 	gocontext "context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -57,7 +56,7 @@ var list = &cli.Command{
 		}
 		clean, err := copyDb(baseDBDir)
 		if err != nil {
-			log.Printf("network: failed to copy dbs: %v", err)
+			myPrint("network: failed to copy dbs: %v", err)
 			return err
 		}
 		if clean != nil {
@@ -75,7 +74,7 @@ var list = &cli.Command{
 				return err
 			}
 			if id != net.SandboxID {
-				log.Printf("[fatal]: id not match, %s, %s", id, net.SandboxID)
+				myPrint("[fatal]: id not match, %s, %s", id, net.SandboxID)
 				continue
 			}
 			var metadata provider.NetworkProvider
@@ -106,7 +105,7 @@ func copyDb(onlineBaseDir string) (func(), error) {
 
 	exist, er := utils.DenExist(targedir)
 	if er != nil || !exist {
-		log.Printf("failed to create temp dir: %v", er)
+		myPrint("failed to create temp dir: %v", er)
 		return nil, er
 	}
 
@@ -115,20 +114,25 @@ func copyDb(onlineBaseDir string) (func(), error) {
 		{"ls", "-l", onlineBaseDir},
 		{"cp", "-r", onlineBaseDir, targedir},
 	}
-	log.Printf("cmds:%v", cmds)
+	myPrint("cmds:%v", cmds)
 	for _, cmd := range cmds {
 		if out, stderr, err := utils.ExecV(cmd, cmdTimeout); err == nil {
-			log.Printf("network: %v", out)
+			myPrint("network: %v", out)
 		} else {
-			log.Printf("network: failed to exec %v: %v", cmd, err)
+			myPrint("network: failed to exec %v: %v", cmd, err)
 			return clean, fmt.Errorf("network failed:%s", stderr)
 		}
 	}
 
 	var err error
 	if dbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, dbDir), "meta.db", 10, nil); err != nil {
-		log.Printf("network: failed to open db: %v", err)
+		myPrint("network: failed to open db: %v", err)
 		return clean, err
 	}
 	return clean, nil
+}
+
+func myPrint(format string, a ...interface{}) {
+	fmt.Printf("%v,"+format+"\n",
+		append([]interface{}{fmt.Sprintf("%v", time.Now().Format(time.RFC3339Nano))}, a...)...)
 }

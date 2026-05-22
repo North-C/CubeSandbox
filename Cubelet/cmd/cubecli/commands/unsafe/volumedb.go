@@ -7,7 +7,6 @@ package unsafe
 import (
 	gocontext "context"
 	"fmt"
-	"log"
 	"os"
 	"path"
 	"path/filepath"
@@ -72,7 +71,7 @@ var volumedb = &cli.Command{
 		}
 		clean, err := copyDb(baseDBDir)
 		if err != nil {
-			log.Printf("volumedb: failed to copy dbs: %v", err)
+			myPrint("volumedb: failed to copy dbs: %v", err)
 			return err
 		}
 		if clean != nil {
@@ -81,7 +80,7 @@ var volumedb = &cli.Command{
 
 		all, err := volumedbHandle.ReadAll(bucketName)
 		if err != nil {
-			log.Printf("ReadAll[%s]  fail:%v", bucketName, err)
+			myPrint("ReadAll[%s]  fail:%v", bucketName, err)
 			return err
 		}
 
@@ -90,7 +89,7 @@ var volumedb = &cli.Command{
 			bf := &createInfo{}
 			err = jsoniter.ConfigFastest.Unmarshal(v, bf)
 			if err != nil {
-				log.Printf("decode[%s]  fail:%v", k, err)
+				myPrint("decode[%s]  fail:%v", k, err)
 				continue
 			}
 			allSandboxVolumes[k] = bf
@@ -105,7 +104,7 @@ func checkSandboxDirty(clictx *cli.Context, all map[string]*createInfo) {
 	start := time.Now()
 	conn, ctx, cancel, err := commands.NewGrpcConn(clictx)
 	if err != nil {
-		log.Printf("Failed to NewGrpcConn: %v", err)
+		myPrint("Failed to NewGrpcConn: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -118,15 +117,15 @@ func checkSandboxDirty(clictx *cli.Context, all map[string]*createInfo) {
 		req.Id = &k
 		resp, err := client.List(ctx, req)
 		if err != nil {
-			log.Printf("Failed to List: %v", err)
+			myPrint("Failed to List: %v", err)
 			return
 		}
 		if len(resp.Items) == 0 {
 			cnt++
-			log.Printf("volumedb_db_dirty: %s:%s", k, v)
+			myPrint("volumedb_db_dirty: %s:%s\n", k, v)
 		}
 	}
-	log.Printf("volumedb scan done,total:%d,dirty:%d,cost:%v",
+	myPrint("volumedb scan done,total:%d,dirty:%d,cost:%v",
 		len(all), cnt, time.Since(start))
 }
 
@@ -141,7 +140,7 @@ func copyDb(onlineBaseDir string) (func(), error) {
 
 	exist, er := utils.DenExist(targedir)
 	if er != nil || !exist {
-		log.Printf("volumedb: failed to create temp dir: %v", er)
+		myPrint("volumedb: failed to create temp dir: %v", er)
 		return nil, er
 	}
 
@@ -150,19 +149,19 @@ func copyDb(onlineBaseDir string) (func(), error) {
 		{"ls", "-l", onlineBaseDir},
 		{"cp", "-r", onlineBaseDir, targedir},
 	}
-	log.Printf("cmds:%v", cmds)
+	myPrint("cmds:%v", cmds)
 	for _, cmd := range cmds {
 		if out, stderr, err := utils.ExecV(cmd, cmdTimeout); err == nil {
-			log.Printf("volumedb: %v", out)
+			myPrint("volumedb: %v", out)
 		} else {
-			log.Printf("volumedb: failed to exec %v: %v", cmd, err)
+			myPrint("volumedb: failed to exec %v: %v", cmd, err)
 			return clean, fmt.Errorf("volumedb failed:%s", stderr)
 		}
 	}
 
 	var err error
 	if volumedbHandle, err = utils.NewCubeStoreExt(filepath.Join(targedir, volumeDbDir), "meta.db", 10, nil); err != nil {
-		log.Printf("volumedb: failed to open lifetime db: %v", err)
+		myPrint("volumedb: failed to open lifetime db: %v", err)
 		return clean, err
 	}
 	return clean, nil

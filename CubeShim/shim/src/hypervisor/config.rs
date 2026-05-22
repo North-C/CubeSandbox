@@ -75,7 +75,9 @@ impl Default for VmConfig {
             "rootflags=dax,errors=remount-ro ro".to_string(),
             "rootfstype=ext4".to_string(),
             "panic=1".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "no_timer_check".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "noreplace-smp".to_string(),
             "printk.devkmsg=on".to_string(),
             "console=hvc0".to_string(),
@@ -83,9 +85,11 @@ impl Default for VmConfig {
             "audit=0".to_string(),
             "LANG=C".to_string(),
             "raid=noautodetect".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "earlyprintk=ttyS0".to_string(),
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "mitigations=off".to_string(),
         ];
 
@@ -169,6 +173,33 @@ impl VmConfig {
 
     pub fn add_cmdline(&mut self, cmd: String) -> &mut Self {
         self.cmdlines.push(cmd);
+        self
+    }
+
+    pub fn add_sandbox_clock_cmdlines(&mut self) -> &mut Self {
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            self.add_cmdline("highres=off".to_string());
+            self.add_cmdline("clocksource=kvm-clock".to_string());
+        }
+        self
+    }
+
+    pub fn add_snapshot_clock_cmdlines(&mut self, tap: bool) -> &mut Self {
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            if tap {
+                self.add_cmdline("highres=off".to_string());
+                self.add_cmdline("clocksource=kvm-clock".to_string());
+            } else {
+                self.add_cmdline("clocksource=tsc".to_string());
+                self.add_cmdline("tsc=reliable".to_string());
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let _ = tap;
+        }
         self
     }
 
@@ -457,7 +488,9 @@ mod tests {
             "rootflags=dax,errors=remount-ro ro".to_string(),
             "rootfstype=ext4".to_string(),
             "panic=1".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "no_timer_check".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "noreplace-smp".to_string(),
             "printk.devkmsg=on".to_string(),
             "console=hvc0".to_string(),
@@ -465,12 +498,50 @@ mod tests {
             "audit=0".to_string(),
             "LANG=C".to_string(),
             "raid=noautodetect".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "earlyprintk=ttyS0".to_string(),
             "agent.debug_console".to_string(),
             "agent.debug_console_vport=1026".to_string(),
+            #[cfg(not(target_arch = "aarch64"))]
             "mitigations=off".to_string(),
         ];
         assert_eq!(config.cmdlines, params);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn utils_config_aarch64_omits_x86_cmdlines() {
+        let config = VmConfig::default();
+        for param in [
+            "no_timer_check",
+            "noreplace-smp",
+            "earlyprintk=ttyS0",
+            "mitigations=off",
+        ] {
+            assert!(
+                !config.cmdlines.contains(&param.to_string()),
+                "aarch64 default cmdline must not contain {}",
+                param
+            );
+        }
+    }
+
+    #[test]
+    fn utils_config_arch_clock_cmdlines() {
+        let mut config = VmConfig::default();
+        config.add_sandbox_clock_cmdlines();
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert!(!config.cmdlines.contains(&"highres=off".to_string()));
+            assert!(!config.cmdlines.contains(&"clocksource=kvm-clock".to_string()));
+        }
+
+        #[cfg(not(target_arch = "aarch64"))]
+        {
+            assert!(config.cmdlines.contains(&"highres=off".to_string()));
+            assert!(config.cmdlines.contains(&"clocksource=kvm-clock".to_string()));
+        }
     }
 
     #[test]

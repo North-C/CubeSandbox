@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"sort"
 	"strconv"
@@ -262,7 +261,7 @@ func multiRunAction(c *cli.Context) error {
 		for _, arg := range c.Args().Slice() {
 			_, err := getParams(arg)
 			if err != nil {
-				log.Printf("Multitun getParams err. %s", err.Error())
+				myPrint("Multitun getParams err. %s", err.Error())
 				continue
 			}
 			cnt += 1
@@ -283,12 +282,12 @@ func multiRunAction(c *cli.Context) error {
 		if len(pertentistmp) > 0 {
 			pertentis = pertentistmp
 		}
-		log.Printf("pertentis:%v", pertentis)
+		myPrint("pertentis:%v", pertentis)
 	}
-	log.Printf("Args:%v", c.Args())
+	myPrint("Args:%v", c.Args())
 	conn, _, cancel, err := commands.NewGrpcConn(c)
 	if err != nil {
-		log.Printf("connect err. %s", err.Error())
+		myPrint("connect err. %s", err.Error())
 		return err
 	}
 	if c.IsSet("delcc") {
@@ -309,7 +308,7 @@ func multiRunAction(c *cli.Context) error {
 			if err == nil {
 				if strings.EqualFold(strings.Trim(string(data), "\n"), "1") {
 					tmpWg.cancel()
-					log.Printf("benchrun stop")
+					myPrint("benchrun stop")
 					return
 				}
 			}
@@ -329,7 +328,7 @@ func multiRunAction(c *cli.Context) error {
 	for _, arg := range c.Args().Slice() {
 		reqByte, err := getParams(arg)
 		if err != nil {
-			log.Printf("Multitun getParams err. %s", err.Error())
+			myPrint("Multitun getParams err. %s", err.Error())
 			continue
 		}
 		tmpWg.wg.Add(1)
@@ -376,7 +375,7 @@ func workerwithrm(wg *wrapWg, reqByte []byte) error {
 						}
 						retry++
 						if retry > 10 {
-							log.Printf("remove container err. %s", err.Error())
+							myPrint("remove container err. %s", err.Error())
 							break
 						}
 						time.Sleep(time.Second)
@@ -391,7 +390,7 @@ func workerwithrm(wg *wrapWg, reqByte []byte) error {
 
 				if img := wg.cliContext.String("rmimage"); img != "" {
 					if err := removeImage(wg.cliContext, img); err != nil {
-						log.Printf("remove image err. %s", err.Error())
+						myPrint("remove image err. %s", err.Error())
 					}
 				}
 				sleep := wg.cliContext.Duration("sleep_after_del")
@@ -447,12 +446,12 @@ func runReq(wg *wrapWg, reqByte []byte) (string, error) {
 	resp, err := client.Create(ctx, req)
 	cost := time.Since(startTime).Milliseconds()
 	if err != nil {
-		log.Printf("RunContainer err. %s. RequestId: %s", err.Error(), req.RequestID)
+		myPrint("RunContainer err. %s. RequestId: %s", err.Error(), req.RequestID)
 		time.Sleep(5 * time.Second)
 		atomic.AddInt64(&totalRunErr, 1)
 		return "", err
 	}
-	log.Printf("RunContainer RequestId:%s,sandBoxId:%s,Ip:%s,code:%d, message:%s,cost:%v", resp.RequestID,
+	myPrint("RunContainer RequestId:%s,sandBoxId:%s,Ip:%s,code:%d, message:%s,cost:%v", resp.RequestID,
 		resp.SandboxID,
 		resp.SandboxIP,
 		resp.Ret.RetCode, resp.Ret.RetMsg, cost)
@@ -465,7 +464,7 @@ func runReq(wg *wrapWg, reqByte []byte) (string, error) {
 	addRunCost(req_cost_in_ms, cost)
 	for k, v := range resp.ExtInfo {
 		if strings.HasPrefix(k, "cube-ext") {
-			log.Printf("%s:%s", k, string(v))
+			myPrint("%s:%s", k, string(v))
 			continue
 		}
 		t, err := strconv.ParseInt(string(v), 10, 64)
@@ -494,11 +493,11 @@ func remove(wg *wrapWg, containerID string) error {
 	resp, err := client.Destroy(ctx, req)
 	cost := time.Since(startTime).Milliseconds()
 	if err != nil {
-		log.Printf("destroy failure:%v", err)
+		myPrint("destroy failure:%v", err)
 		atomic.AddInt64(&totalDelErr, 1)
 		return err
 	}
-	log.Printf("Remove ContainerRequestId:%s,sandBoxId:%s, code:%d, message:%s,cost:%d", resp.RequestID, containerID,
+	myPrint("Remove ContainerRequestId:%s,sandBoxId:%s, code:%d, message:%s,cost:%d", resp.RequestID, containerID,
 		resp.Ret.RetCode, resp.Ret.RetMsg, cost)
 	if resp.Ret.RetCode != errorcode.ErrorCode_Success {
 		atomic.AddInt64(&totalDelErr, 1)
@@ -539,18 +538,18 @@ func printPercentiles(id string, h metrics.Histogram) {
 	for i, d := range pertentis {
 		buff.WriteString(fmt.Sprintf("p%d:%d\t", int(d*100), int(ps[i]*1000)/1000))
 	}
-	log.Printf("%v:[%v]", id, buff.String())
+	myPrint("%v:[%v]", id, buff.String())
 }
 func printRunResult(c *cli.Context) {
-	log.Printf("totalRunSuccCnt:%v", totalRunSuccCnt)
-	log.Printf("totalRunErr:%v", totalRunErr)
+	myPrint("totalRunSuccCnt:%v", totalRunSuccCnt)
+	myPrint("totalRunErr:%v", totalRunErr)
 	if totalRunSuccCnt > 0 {
-		log.Printf("runMetric:")
+		myPrint("runMetric:")
 		for k, v := range runMetric {
 			printPercentiles(k, v.histogram)
 			if c.Bool("printall") {
 				sort.Sort(v.data)
-				log.Printf("%v:%v", k, v.data)
+				myPrint("%v:%v", k, v.data)
 			}
 		}
 	}
@@ -575,15 +574,15 @@ func addDestroyCost(id string, cost int64) {
 	m.histogram.Update(cost)
 }
 func printDestroyResult(c *cli.Context) {
-	log.Printf("totalDelSuccCnt:%v", totalDelSuccCnt)
-	log.Printf("totalDelErr:%v", totalDelErr)
+	myPrint("totalDelSuccCnt:%v", totalDelSuccCnt)
+	myPrint("totalDelErr:%v", totalDelErr)
 	if totalDelSuccCnt > 0 {
-		log.Printf("removeMetric:")
+		myPrint("removeMetric:")
 		for k, v := range removeMetric {
 			printPercentiles(k, v.histogram)
 			if c.Bool("printall") {
 				sort.Sort(v.data)
-				log.Printf("%v:%v", k, v.data)
+				myPrint("%v:%v", k, v.data)
 			}
 		}
 	}

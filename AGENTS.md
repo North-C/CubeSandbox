@@ -1,30 +1,29 @@
-# AGENTS Policy
+<!-- TRELLIS:START -->
+# Trellis Instructions
 
+These instructions are for AI assistants working in this project.
 
+This project is managed by Trellis. The working knowledge you need lives under `.trellis/`:
 
-## AI-Generated Code Policy
+- `.trellis/workflow.md` — development phases, when to create tasks, skill routing
+- `.trellis/spec/` — package- and layer-scoped coding guidelines (read before writing code in a given layer)
+- `.trellis/workspace/` — per-developer journals and session traces
+- `.trellis/tasks/` — active and archived tasks (PRDs, research, jsonl context)
 
-AI agents MUST NOT add Signed-off-by tags. Only humans can legally certify the Developer Certificate of Origin (DCO). The human submitter is responsible for:
+If a Trellis command is available on your platform (e.g. `/trellis:finish-work`, `/trellis:continue`), prefer it over manual steps. Not every platform exposes every command.
 
-- Reviewing all AI-generated code
-- Ensuring compliance with licensing requirements
-- Adding their own Signed-off-by tag to certify the DCO
-- Taking full responsibility for the contribution
+If you're using Codex or another agent-capable tool, additional project-scoped helpers may live in:
+- `.agents/skills/` — reusable Trellis skills
+- `.codex/agents/` — optional custom subagents
 
-**MUST FOLLOW THIS**: When performing a `git commit` or submitting a GitHub PR, the commit message or PR description MUST include the following tag — this is required so that agent contributions remain visible and attributable in the project history:
+## Subagents
 
-- If the work was **human-assisted by an AI agent**, include:
+- ALWAYS wait for all subagents to complete before yielding.
+- Spawn subagents automatically when:
+  - Parallelizable work (e.g., install + verify, npm test + typecheck, multiple tasks from plan)
+  - Long-running or blocking tasks where a worker can run independently.
+  - Isolation for risky changes or checks
 
-```
-Assisted-by: AGENT_NAME:MODEL_VERSION
-```
+Managed by Trellis. Edits outside this block are preserved; edits inside may be overwritten by a future `trellis update`.
 
-- If the commit/PR was **fully completed autonomously by an AI agent** (without human authoring), include instead:
-
-```
-Autonomously-by: AGENT_NAME:MODEL_VERSION
-```
-
-Where:
-- `AGENT_NAME` is the name of the AI tool or framework
-- `MODEL_VERSION` is the specific model version used
+<!-- TRELLIS:END -->

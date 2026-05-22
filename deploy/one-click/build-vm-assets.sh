@@ -18,8 +18,13 @@ GUEST_ROOTFS_DIR="${GUEST_IMAGE_WORK_DIR}/rootfs"
 GUEST_ROOTFS_TAR="${GUEST_IMAGE_WORK_DIR}/rootfs.tar"
 RAW_ARTIFACTS_DIR="${SCRIPT_DIR}/assets/kernel-artifacts"
 
-CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
-CUBE_KERNEL_PVM_VMLINUX="${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux-pvm}"
+TARGET_ARCH="$(one_click_target_arch)"
+TARGET_PLATFORM="$(one_click_platform)"
+PLATFORM_SUFFIX="$(one_click_platform_suffix)"
+CUBE_KERNEL_DIR_NAME="$(one_click_kernel_dir_name)"
+CUBE_IMAGE_DIR_NAME="$(one_click_image_dir_name)"
+
+CUBE_KERNEL_VMLINUX="$(one_click_resolve_kernel_vmlinux "${RAW_ARTIFACTS_DIR}")"
 GUEST_IMAGE_DOCKERFILE="${ONE_CLICK_GUEST_IMAGE_DOCKERFILE:-${ROOT_DIR}/deploy/guest-image/Dockerfile}"
 GUEST_IMAGE_CONTEXT_DIR="${ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR:-$(dirname "${GUEST_IMAGE_DOCKERFILE}")}"
 GUEST_IMAGE_REF="${ONE_CLICK_GUEST_IMAGE_REF:-cube-sandbox-guest-image:one-click}"
@@ -268,6 +273,7 @@ inject_agent_into_guest_rootfs() {
   local resolv_tmp="${GUEST_IMAGE_WORK_DIR}/resolv.conf"
 
   ensure_file "${AGENT_BIN}"
+  one_click_validate_file_arch "${AGENT_BIN}" "cube-agent" "${TARGET_ARCH}"
 
   mkdir -p "${guest_rootfs_dir}/sbin" "${guest_rootfs_dir}/etc"
 
@@ -280,6 +286,7 @@ inject_agent_into_guest_rootfs() {
   fi
 
   copy_binary_with_deps "${AGENT_BIN}" "/sbin/init" "${guest_rootfs_dir}"
+  one_click_validate_file_arch "${init_path}" "guest /sbin/init cube-agent" "${TARGET_ARCH}"
 
   if [[ ! -e "${rc_local_path}" ]]; then
     cat > "${rc_local_tmp}" <<'EOF'
@@ -338,7 +345,11 @@ build_guest_image_artifacts() {
   remove_path_with_optional_sudo "${GUEST_ROOTFS_DIR}" "${GUEST_ROOTFS_TAR}"
 
   log "building guest image from ${GUEST_IMAGE_DOCKERFILE}"
-  docker build -t "${GUEST_IMAGE_REF}" -f "${GUEST_IMAGE_DOCKERFILE}" "${GUEST_IMAGE_CONTEXT_DIR}" >&2
+  docker build \
+    --platform "${TARGET_PLATFORM}" \
+    -t "${GUEST_IMAGE_REF}" \
+    -f "${GUEST_IMAGE_DOCKERFILE}" \
+    "${GUEST_IMAGE_CONTEXT_DIR}" >&2
 
   guest_container_id="$(docker create "${GUEST_IMAGE_REF}")"
   trap 'if [[ -n "${guest_container_id:-}" ]]; then docker rm -f "${guest_container_id}" >/dev/null 2>&1 || true; fi' RETURN
@@ -348,6 +359,7 @@ build_guest_image_artifacts() {
 
   mkdir -p "${GUEST_ROOTFS_DIR}"
   tar -xf "${GUEST_ROOTFS_TAR}" -C "${GUEST_ROOTFS_DIR}"
+  one_click_validate_guest_rootfs_arch "${GUEST_ROOTFS_DIR}" "${TARGET_ARCH}"
   inject_agent_into_guest_rootfs "${GUEST_ROOTFS_DIR}"
 
   rootfs_size_bytes="$(directory_size_bytes "${GUEST_ROOTFS_DIR}")"
@@ -372,6 +384,7 @@ require_cmd docker
 require_cmd tar
 
 ensure_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${RAW_ARTIFACTS_DIR}"
+one_click_validate_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${TARGET_ARCH}"
 ensure_mkfs_ext4_supports_populate_dir
 
 AGENT_BIN="$(build_cube_agent)"
@@ -382,8 +395,11 @@ remove_path_with_optional_sudo "${RUNTIME_LAYOUT_DIR}" "${GUEST_IMAGE_WORK_DIR}"
 mkdir -p \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/bin" \
   "${RUNTIME_LAYOUT_DIR}/cube-shim/conf" \
-  "${RUNTIME_LAYOUT_DIR}/cube-image" \
-  "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf"
+  "${RUNTIME_LAYOUT_DIR}/${CUBE_IMAGE_DIR_NAME}" \
+  "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}"
+
+ln -sfn "${CUBE_IMAGE_DIR_NAME}" "${RUNTIME_LAYOUT_DIR}/cube-image"
+ln -sfn "${CUBE_KERNEL_DIR_NAME}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf"
 
 log "copying runtime binaries"
 copy_file "${CUBESHIM_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs"
@@ -391,21 +407,13 @@ copy_file "${CUBE_RUNTIME_BIN}" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtim
 chmod +x "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/containerd-shim-cube-rs" "${RUNTIME_LAYOUT_DIR}/cube-shim/bin/cube-runtime"
 prepare_runtime_config "${RUNTIME_LAYOUT_DIR}/cube-shim/conf/config-cube.toml"
 
-log "building guest image artifacts"
+log "building guest image artifacts for ${TARGET_PLATFORM}"
 build_guest_image_artifacts \
-  "${RUNTIME_LAYOUT_DIR}/cube-image/cube-guest-image-cpu.img" \
-  "${RUNTIME_LAYOUT_DIR}/cube-image/version"
-log "copying fixed kernel vmlinux"
-copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
-ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux"
-if [[ -f "${CUBE_KERNEL_PVM_VMLINUX}" ]]; then
-  log "copying PVM kernel vmlinux"
-  copy_file "${CUBE_KERNEL_PVM_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
-  ensure_file "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf/vmlinux-pvm"
-elif [[ -n "${ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX:-}" ]]; then
-  die "PVM kernel vmlinux file not found: ${CUBE_KERNEL_PVM_VMLINUX}"
-else
-  log "PVM kernel vmlinux not found; packaging ordinary kernel only"
-fi
+  "${RUNTIME_LAYOUT_DIR}/${CUBE_IMAGE_DIR_NAME}/cube-guest-image-cpu.img" \
+  "${RUNTIME_LAYOUT_DIR}/${CUBE_IMAGE_DIR_NAME}/version"
+log "copying fixed kernel vmlinux for ${TARGET_PLATFORM}"
+copy_file "${CUBE_KERNEL_VMLINUX}" "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}/vmlinux"
+ensure_file "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}/vmlinux"
+one_click_validate_kernel_vmlinux "${RUNTIME_LAYOUT_DIR}/${CUBE_KERNEL_DIR_NAME}/vmlinux" "${TARGET_ARCH}"
 
 log "runtime layout ready: ${RUNTIME_LAYOUT_DIR}"

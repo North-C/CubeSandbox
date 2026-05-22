@@ -332,20 +332,26 @@ func TestGetTemplateVolumes(t *testing.T) {
 			},
 		},
 		{
-			name:         "HostDirVolumeSources类型存在匹配",
-			sourceVolume: &types.HostDirVolumeSources{},
+			name: "HostDirVolumeSources类型存在匹配",
+			sourceVolume: &types.HostDirVolumeSources{
+				AppId: 12345,
+			},
 			templateVolumes: []*types.Volume{
 				{
 					Name: "cos-volume",
 					VolumeSource: &types.VolumeSource{
-						HostDirVolumeSources: &types.HostDirVolumeSources{},
+						HostDirVolumeSources: &types.HostDirVolumeSources{
+							AppId: 67890,
+						},
 					},
 				},
 			},
 			expectedResult: &types.Volume{
 				Name: "cos-volume",
 				VolumeSource: &types.VolumeSource{
-					HostDirVolumeSources: &types.HostDirVolumeSources{},
+					HostDirVolumeSources: &types.HostDirVolumeSources{
+						AppId: 67890,
+					},
 				},
 			},
 		},
@@ -428,7 +434,9 @@ func TestGetTemplateVolumes(t *testing.T) {
 				{
 					Name: "volume3",
 					VolumeSource: &types.VolumeSource{
-						HostDirVolumeSources: &types.HostDirVolumeSources{},
+						HostDirVolumeSources: &types.HostDirVolumeSources{
+							AppId: 99999,
+						},
 					},
 				},
 			},

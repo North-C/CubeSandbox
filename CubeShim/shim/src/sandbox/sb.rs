@@ -699,8 +699,7 @@ impl SandBox {
         } else {
             vc.add_cmdline("quiet".to_string());
         }
-        vc.add_cmdline("highres=off".to_string());
-        vc.add_cmdline("clocksource=kvm-clock".to_string());
+        vc.add_sandbox_clock_cmdlines();
 
         // 添加外部传入的 pmem
         vc.add_pmems(&self.conf.pmem);
@@ -773,6 +772,7 @@ impl SandBox {
             self.boot_vm().await?;
         }
 
+        #[cfg(not(target_arch = "aarch64"))]
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
             let start = Instant::now();
@@ -789,6 +789,33 @@ impl SandBox {
             }
             let duration = start.elapsed().as_millis();
             infof!(self.log, "vm ready, vsock is listening, cost:{}", duration);
+        }
+        #[cfg(target_arch = "aarch64")]
+        {
+            let start = Instant::now();
+            let timeout = Duration::from_secs(10);
+            let mut last_err = String::new();
+
+            while start.elapsed() < timeout {
+                match AsyncUtils::connect_agent(&self.id).await {
+                    Ok(conn) => {
+                        drop(conn);
+                        let duration = start.elapsed().as_millis();
+                        infof!(self.log, "vm ready, agent vsock is connectable, cost:{}", duration);
+                        return Ok(snapshot);
+                    }
+                    Err(e) => {
+                        last_err = e.to_string();
+                        sleep(Duration::from_millis(100)).await;
+                    }
+                }
+            }
+
+            return Err(format!(
+                "Receive agent vsock ready timeout after {}ms, last error:{}",
+                timeout.as_millis(),
+                last_err
+            ));
         }
         Ok(snapshot)
     }
@@ -1287,6 +1314,10 @@ mod tests {
             .cmdlines
             .contains(&"another.param=foo".to_string()));
 
+        #[cfg(target_arch = "aarch64")]
+        let mut set_expect: HashSet<String> = HashSet::new();
+
+        #[cfg(not(target_arch = "aarch64"))]
         let mut set_expect: HashSet<String> = vec!["highres=off", "clocksource=kvm-clock"]
             .into_iter()
             .map(|s| s.to_string())

@@ -27,6 +27,7 @@ use nix::unistd::{self, dup, Pid};
 use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, File};
+use std::io::{ErrorKind, Write};
 use std::os::unix::fs as unixfs;
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
@@ -172,19 +173,36 @@ async fn real_main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
         // Must mount proc fs before parsing kernel command line
         if env::var(ENV_WRAPPER_MODE_K).is_err() {
+            early_console("real_main before general_mount");
             general_mount(&logger).map_err(|e| {
+                early_console(format!("real_main general_mount failed: {}", e));
                 error!(logger, "fail general mount: {}", e);
                 e
             })?;
+            early_console("real_main after general_mount");
 
+            early_console("real_main before rc_local");
             enable_rc_local().await;
-            println!(
+            early_console(format!(
                 "rc-local exit at:{}",
                 moniclock::Clock::new().elapsed().as_millis()
-            );
+            ));
 
+            early_console("real_main before AGENT_CONFIG init");
             lazy_static::initialize(&AGENT_CONFIG);
-            init_agent_as_init(&logger, AGENT_CONFIG.read().await.unified_cgroup_hierarchy)?;
+            let unified_cgroup_hierarchy = AGENT_CONFIG.read().await.unified_cgroup_hierarchy;
+            early_console(format!(
+                "real_main before init_agent_as_init unified_cgroup_hierarchy={}",
+                unified_cgroup_hierarchy
+            ));
+            init_agent_as_init(&logger, unified_cgroup_hierarchy).map_err(|e| {
+                early_console(format!("real_main init_agent_as_init failed: {}", e));
+                for cause in e.chain().skip(1) {
+                    early_console(format!("caused by: {}", cause));
+                }
+                e
+            })?;
+            early_console("real_main after init_agent_as_init");
         }
         drop(logger_async_guard);
     } else {
@@ -314,7 +332,37 @@ fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
         .enable_all()
         .build()?;
 
-    rt.block_on(real_main())
+    match rt.block_on(real_main()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("cube-agent fatal error: {}", e);
+            let mut source = e.source();
+            while let Some(err) = source {
+                eprintln!("caused by: {}", err);
+                source = err.source();
+            }
+            Err(e)
+        }
+    }
+}
+
+fn error_chain_contains_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|err| {
+        err.downcast_ref::<std::io::Error>()
+            .map(|io_err| io_err.kind() == ErrorKind::NotFound)
+            .unwrap_or(false)
+            || err.to_string().contains("No such file or directory")
+    })
+}
+
+fn early_console(message: impl AsRef<str>) {
+    let message = message.as_ref();
+    eprintln!("{}", message);
+    for console in ["/dev/hvc0", "/dev/console"] {
+        if let Ok(mut writer) = fs::OpenOptions::new().write(true).open(console) {
+            let _ = writeln!(writer, "{}", message);
+        }
+    }
 }
 
 #[instrument]
@@ -409,16 +457,42 @@ async fn start_sandbox(
 // init_agent_as_init will do the initializations such as setting up the rootfs
 // when this agent has been run as the init process.
 fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<()> {
-    cgroups_mount(logger, unified_cgroup_hierarchy).map_err(|e| {
+    early_console(format!(
+        "init cgroups start at:{}",
+        moniclock::Clock::new().elapsed().as_millis()
+    ));
+    if let Err(e) = cgroups_mount(logger, unified_cgroup_hierarchy) {
         error!(
             logger,
             "fail cgroups mount, unified_cgroup_hierarchy {}: {}", unified_cgroup_hierarchy, e
         );
-        e
-    })?;
+        if error_chain_contains_not_found(&e) {
+            warn!(
+                logger,
+                "skip cgroups mount failure caused by missing guest cgroup file"
+            );
+            early_console(format!("skip cgroups mount missing file: {}", e));
+        } else {
+            return Err(e);
+        }
+    }
+    early_console(format!(
+        "init cgroups exit at:{}",
+        moniclock::Clock::new().elapsed().as_millis()
+    ));
 
-    fs::remove_file(Path::new("/dev/ptmx"))?;
+    match fs::remove_file(Path::new("/dev/ptmx")) {
+        Ok(_) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            warn!(logger, "skip removing /dev/ptmx because it is missing");
+        }
+        Err(e) => return Err(e).context("failed to remove /dev/ptmx"),
+    }
     unixfs::symlink(Path::new("/dev/pts/ptmx"), Path::new("/dev/ptmx"))?;
+    early_console(format!(
+        "init ptmx exit at:{}",
+        moniclock::Clock::new().elapsed().as_millis()
+    ));
 
     unistd::setsid()?;
 
@@ -437,6 +511,7 @@ fn init_agent_as_init(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result
         warn!(logger, "failed to set hostname");
     }
 
+    early_console("init_agent_as_init exit");
     Ok(())
 }
 

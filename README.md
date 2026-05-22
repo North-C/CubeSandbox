@@ -26,8 +26,7 @@
   <a href="./README_zh.md"><strong>中文文档</strong></a> ·
   <a href="./docs/guide/quickstart.md"><strong>Quick Start</strong></a> ·
   <a href="./docs/index.md"><strong>Documentation</strong></a> ·
-  <a href="./docs/changelog.md"><strong>Changelog</strong></a> ·
-  <a href="https://x.com/CubeSandbox_AI"><strong>X(Twitter)</strong></a>
+  <a href="https://discord.gg/kkapzDXShb" target="_blank"><strong>Discord</strong></a>
 </p>
 
 ---
@@ -140,16 +139,15 @@ For detailed metrics on startup latency and resource overhead, please refer to:
 
 
 
-Cube Sandbox requires an x86_64 Linux environment with KVM support — **WSL 2**, a **Linux physical machine**, a **cloud bare-metal server**, or an **ordinary cloud VM** (via PVM, no bare-metal needed) all work.
+Cube Sandbox requires a KVM-enabled x86_64 Linux environment — **WSL 2**, a **Linux physical machine**, or a **cloud bare-metal server** all work.
 
 > Don't have one yet?
 > - **Windows users**: run `wsl --install` in an admin PowerShell to set up WSL 2 (requires Windows 11 22H2+, with nested virtualization enabled in BIOS / WSL).
-> - **Bare-metal / physical machine users**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
-> - **Ordinary cloud VM users**: no bare-metal required — install the PVM host kernel to enable KVM on any standard cloud VM. See [PVM Deployment](./docs/guide/pvm-deploy.md).
+> - **Others**: grab an x86_64 Linux physical machine, or rent a bare-metal server from a cloud provider.
 
 Once your environment is ready, launch your first sandbox in four steps:
 
-1. **Prepare the runtime environment** (skip this step if you already have an x86_64 Linux server with KVM enabled — bare-metal or a cloud VM set up via [PVM](./docs/guide/pvm-deploy.md))
+1. **Prepare the runtime environment** (skip this step if you already have an x86_64 bare-metal Linux server)
 
 Run the following on your WSL / Linux machine:
 
@@ -173,7 +171,7 @@ cd CubeSandbox/dev-env && ./login.sh
 
 2. **Start the Cube Sandbox Service**
 
-Inside the environment you entered via `login.sh` (or directly on your server — bare-metal or cloud VM), run **one** of the following commands depending on your location:
+Inside the environment you entered via `login.sh` (or directly on your bare-metal server), run **one** of the following commands depending on your location:
 
 - **Global Users** (downloads from GitHub):
 
@@ -195,14 +193,12 @@ After installation, create a code interpreter template from the prebuilt image:
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --image ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
   --probe 49999
 ```
-
-> **Image registry:** Use `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` (recommended for international access). If you are in mainland China, use `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest` instead.
 
 Then run the following command to monitor the build progress:
 
@@ -253,8 +249,7 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 - 📖 [Documentation Home](./docs/index.md) - Complete guide and API reference
 - 🔧 [Template Concepts](./docs/guide/templates.md) - Image-to-Template concepts and workflows
 - 🌟 [Example Projects](./docs/guide/tutorials/examples.md) - Hands-on examples demonstrating various Cube Sandbox use cases (Browser automation, OpenClaw integration, RL training workflows, etc.)
-- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No KVM access yet? Spin up a disposable OpenCloudOS 9 VM on your machine and run Cube Sandbox inside it
-- ☁️ [PVM Deployment](./docs/guide/pvm-deploy.md) - Deploy on ordinary cloud VMs without bare-metal or nested virtualization
+- 💻 [Development Environment (QEMU VM)](./docs/guide/dev-environment.md) - No bare-metal? Spin up a disposable OpenCloudOS 9 VM and run Cube Sandbox inside it
 
 ## Architecture
 
@@ -277,7 +272,7 @@ Want to explore more? Check out the 📂 [`examples/`](./examples/) directory, c
 
 We welcome contributions of all kinds—whether it’s a bug report, feature suggestion, documentation improvement, or code submission!
 
-- 🐞 **Found a Bug or have questions?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
+- 🐞 **Found a Bug?** Submit an issue on <a href="https://github.com/tencentcloud/CubeSandbox/issues" target="_blank">GitHub Issues</a>.
 - 💡 **Have an Idea?** Join the conversation in <a href="https://github.com/tencentcloud/CubeSandbox/discussions" target="_blank">GitHub Discussions</a>.
 - 🛠️ **Want to Code?** Check out our <a href="./CONTRIBUTING.md" target="_blank">CONTRIBUTING.md</a> to learn how to submit a Pull Request.
 - 💬 **Want to Chat?** Join our <a href="https://discord.gg/kkapzDXShb" target="_blank">Discord</a>.

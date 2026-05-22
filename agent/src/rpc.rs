@@ -90,6 +90,8 @@ use nix::unistd::{Gid, Uid};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileExt;
+#[cfg(target_arch = "aarch64")]
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
 const CONTAINER_BASE: &str = "/run/cube-containers";
@@ -1842,12 +1844,57 @@ fn notify_hypervisor_agent_started() {
     }
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(target_arch = "aarch64")]
 fn notify_hypervisor_agent_started() {
-    debug!(
-        sl!(),
-        "x86 I/O port startup notification is not supported on this architecture"
-    );
+    const SYS_CTRL_MMIO_BASE: libc::off_t = 0x0903_0000;
+    const SYS_VSOCK_SERVER: u8 = 1 << 3;
+    const MMIO_LEN: usize = 0x1000;
+
+    if !Path::new("/dev/mem").exists() {
+        let mode = stat::Mode::from_bits_truncate(0o600);
+        let dev = stat::makedev(1, 1);
+        if let Err(e) = stat::mknod("/dev/mem", stat::SFlag::S_IFCHR, mode, dev) {
+            error!(sl!(), "failed to create /dev/mem for startup notification: {}", e);
+            return;
+        }
+    }
+
+    let mem = match OpenOptions::new().read(true).write(true).open("/dev/mem") {
+        Ok(mem) => mem,
+        Err(e) => {
+            error!(sl!(), "failed to open /dev/mem for startup notification: {}", e);
+            return;
+        }
+    };
+
+    let map = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            MMIO_LEN,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            mem.as_raw_fd(),
+            SYS_CTRL_MMIO_BASE,
+        )
+    };
+    if map == libc::MAP_FAILED {
+        let e = std::io::Error::last_os_error();
+        error!(sl!(), "failed to map sys_ctrl MMIO for startup notification: {}", e);
+        return;
+    }
+
+    unsafe {
+        std::ptr::write_volatile(map as *mut u8, SYS_VSOCK_SERVER);
+        if libc::munmap(map, MMIO_LEN) != 0 {
+            let e = std::io::Error::last_os_error();
+            warn!(sl!(), "failed to unmap sys_ctrl MMIO after startup notification: {}", e);
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn notify_hypervisor_agent_started() {
+    debug!(sl!(), "startup notification is not supported on this architecture");
 }
 
 // This function updates the container namespaces configuration based on the

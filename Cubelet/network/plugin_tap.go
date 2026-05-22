@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/tencentcloud/CubeSandbox/Cubelet/api/services/errorcode/v1"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/internal/tomlext"
 	. "github.com/tencentcloud/CubeSandbox/Cubelet/network/proto"
+	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/allocator"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/constants"
 	localnetfile "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/container/netfile"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/log"
@@ -33,7 +33,7 @@ import (
 	networkstore "github.com/tencentcloud/CubeSandbox/Cubelet/pkg/store/network"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/pkg/utils"
 	"github.com/tencentcloud/CubeSandbox/Cubelet/plugins/workflow"
-	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
+	"github.com/tencentcloud/CubeSandbox/cubelog"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc/codes"
@@ -41,7 +41,11 @@ import (
 )
 
 var (
+	ErrNotRangeIP = errors.New("NotRangeIP")
+
 	ErrNotCubeTap = errors.New("NotCubeTap")
+
+	ErrIPExhausted = errors.New("IP exhausted")
 
 	ErrInvalidParams = errors.New("invalid network params")
 )
@@ -71,12 +75,24 @@ func getGatewayMacAddr(itName string) (string, error) {
 		return "", fmt.Errorf("physics net card arp not unique. detail: %s", utils.InterfaceToString(neighs))
 	}
 	for _, neigh := range neighs {
-		if neigh.Family == 2 && neigh.State == unix.NUD_REACHABLE {
+		if usableGatewayNeighbor(neigh) {
 			return neigh.HardwareAddr.String(), nil
 		}
 	}
 
 	return "", errors.New("NotFound")
+}
+
+func usableGatewayNeighbor(neigh netlink.Neigh) bool {
+	if neigh.Family != netlink.FAMILY_V4 || len(neigh.HardwareAddr) == 0 {
+		return false
+	}
+	switch neigh.State {
+	case unix.NUD_REACHABLE, unix.NUD_STALE, unix.NUD_DELAY, unix.NUD_PROBE, unix.NUD_PERMANENT:
+		return true
+	default:
+		return false
+	}
 }
 
 func addARPEntry(ip net.IP, mac string, cubeDevIndex int) error {
@@ -249,9 +265,10 @@ func extractIP(name string) (string, error) {
 
 var (
 	Name2MvmNet sync.Map
-)
+	CfgAppMark  string
 
-var DefaultExposedPorts = []uint16{8080, 32000}
+	tapVersion uint32 = 0
+)
 
 type Config struct {
 	EthName             string   `toml:"eth_name"`
@@ -264,6 +281,9 @@ type Config struct {
 	MvmGwMacAddr        string   `toml:"mvm_gw_mac_addr"`
 	MvmMask             int      `toml:"mvm_mask"`
 	MvmMtu              int      `toml:"mvm_mtu"`
+	DisableTso          bool     `toml:"disable_tso"`
+	DisableUfo          bool     `toml:"disable_ufo"`
+	DisableCheckSum     bool     `toml:"disable_check_sum"`
 	DefaultExposedPorts []uint16 `toml:"default_exposed_ports"`
 
 	CheckIntervalTime      tomlext.Duration `toml:"check_interval_in_sec"`
@@ -289,6 +309,8 @@ type Config struct {
 
 type local struct {
 	ID2MvmNet       sync.Map
+	allocator       *IPAllocator
+	portAllocator   allocator.Allocator[uint16]
 	Config          *Config
 	cubeDev         *CubeDev
 	Device          *MachineDevice
@@ -356,11 +378,20 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		return nil, err
 	}
 	log.G(ic.Context).Info("network get node info done")
-	gwIP, mask, err := getGwIPAndMask(config.CIDR)
+	ipAllocator, err := NewAllocator(config.CIDR)
 	if err != nil {
 		return nil, err
 	}
-	cubeDev, err := getOrNewCubeDev(gwIP, mask, config.MvmMtu, config.MvmGwMacAddr)
+	log.G(ic.Context).Info("network ipam init done")
+
+	portAllocator, err := initPortAllocatorFromSysConfig()
+	if err != nil {
+		return nil, err
+	}
+	log.G(ic.Context).Info("network port allocator init done")
+
+	gwIP := ipAllocator.GatewayIP()
+	cubeDev, err := getOrNewCubeDev(gwIP, ipAllocator.mask, config.MvmMtu, config.MvmGwMacAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -370,6 +401,8 @@ func initTapPlugin(ic *plugin.InitContext) (*local, error) {
 		Config:             config,
 		Device:             device,
 		cubeDev:            cubeDev,
+		allocator:          ipAllocator,
+		portAllocator:      portAllocator,
 		DestroyLocks:       utils.NewResourceLocks(),
 		networkAgentClient: networkagentclient.NewNoopClient(),
 	}
@@ -657,6 +690,69 @@ func appendUniqueString(base []string, extra []string) []string {
 	return out
 }
 
+func (l *local) generateShimNetReq(req *NetRequest, tap *Tap) (*ShimNetReq, error) {
+	shimReq := &ShimNetReq{
+		Interfaces: []*Interface{
+			{
+				Name:      tap.Name,
+				IPAddr:    tap.IP,
+				GuestName: eth0,
+				Mac:       l.Config.MVMMacAddr,
+
+				IP: l.Config.MVMInnerIP,
+
+				Family: 0,
+
+				Mask: l.Config.MvmMask,
+				IPs: []MVMIp{
+					{
+						IP:     l.Config.MVMInnerIP,
+						Mask:   l.Config.MvmMask,
+						Family: 0,
+					},
+				},
+				Mtu:             l.Config.MvmMtu,
+				DisableCheckSum: l.Config.DisableCheckSum,
+				DisableTso:      l.Config.DisableTso,
+				DisableUfo:      l.Config.DisableUfo,
+			},
+		},
+		Routes: []Route{
+			{
+				Family:  0,
+				Gateway: l.Config.MvmGwDestIP,
+				Source:  l.Config.MVMInnerIP,
+				Device:  eth0,
+				Scope:   0,
+			},
+		},
+		ARPs: []ARP{
+			{
+				DestIP: l.Config.MvmGwDestIP,
+				Device: eth0,
+				LlAddr: l.Config.MvmGwMacAddr,
+				State:  0,
+				Flags:  0,
+			},
+		},
+		PortMappings: tap.GetPortMappings(),
+	}
+	if req.Qos != nil {
+		bandwidthQos := req.Qos.BandWidth
+		opsQos := req.Qos.OPS
+		shimReq.Interfaces[0].Qos = &QosConfig{
+			BwSize:          bandwidthQos.Size,
+			BwOneTimeBurst:  bandwidthQos.OneTimeBurst,
+			BwRefillTime:    bandwidthQos.RefillTime,
+			OpsSize:         opsQos.Size,
+			OpsOneTimeBurst: opsQos.OneTimeBurst,
+			OpsRefillTime:   opsQos.RefillTime,
+		}
+	}
+
+	return shimReq, nil
+}
+
 func (l *local) Destroy(ctx context.Context, opts *workflow.DestroyContext) error {
 	if opts == nil {
 		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "workflow.DestroyContext nil")
@@ -821,15 +917,18 @@ func (l *local) buildShimNetReqFromEnsureResponse(resp *networkagentclient.Ensur
 	shimReq := &ShimNetReq{
 		Interfaces: []*Interface{
 			{
-				Name:      intf.Name,
-				IPAddr:    sandboxIP,
-				GuestName: eth0,
-				Mac:       intf.MAC,
-				Mtu:       int(intf.MTU),
-				IP:        legacyIP,
-				Family:    0,
-				Mask:      legacyMask,
-				IPs:       mvmIPs,
+				Name:            intf.Name,
+				IPAddr:          sandboxIP,
+				GuestName:       eth0,
+				Mac:             intf.MAC,
+				Mtu:             int(intf.MTU),
+				IP:              legacyIP,
+				Family:          0,
+				Mask:            legacyMask,
+				IPs:             mvmIPs,
+				DisableCheckSum: l.Config.DisableCheckSum,
+				DisableTso:      l.Config.DisableTso,
+				DisableUfo:      l.Config.DisableUfo,
 			},
 		},
 	}
@@ -1084,24 +1183,4 @@ func (l *local) loadNet(sandboxID string) *MvmNet {
 	}
 
 	return mvmNet.(*MvmNet)
-}
-
-func getGwIPAndMask(cidr string) (net.IP, int, error) {
-	prefix, err := netip.ParsePrefix(cidr)
-	if err != nil {
-		return nil, 0, err
-	}
-	if !prefix.Addr().Is4() {
-		return nil, 0, fmt.Errorf("invalid IPv4 CIDR: %s", cidr)
-	}
-	mask := prefix.Bits()
-	if mask < 8 || mask > 30 {
-		return nil, 0, &net.ParseError{Type: "cidr mask fail", Text: cidr}
-	}
-	// Gateway is network address + 1
-	gwAddr := prefix.Masked().Addr().Next()
-	if !gwAddr.IsValid() {
-		return nil, 0, fmt.Errorf("gateway IP address out of bounds for CIDR: %s", cidr)
-	}
-	return gwAddr.AsSlice(), mask, nil
 }

@@ -1,4 +1,4 @@
 **
 !.dockerignore
 !docker/
-!docker/Dockerfile.builder
+!docker/**

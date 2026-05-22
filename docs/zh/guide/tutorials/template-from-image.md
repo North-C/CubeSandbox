@@ -41,14 +41,12 @@ Cube 平台在制作模板时，会启动容器并**通过 HTTP 探测**容器�
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest \
+  --image     ccr.ccs.tencentyun.com/ags-image/sandbox-browser:latest \
   --writable-layer-size 1G \
   --expose-port 9000 \
   --probe 9000 \
   --probe-path /
 ```
-
-> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-browser:latest`。
 
 命令成功后立即返回 `job_id` 和自动生成的 `template_id` 并退出，构建任务在集群后台继续执行：
 
@@ -66,7 +64,7 @@ progress:    0%
 
 ```bash
 cubemastercli tpl create-from-image \
-  --image     cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest \
+  --image     ccr.ccs.tencentyun.com/ags-image/sandbox-code:latest \
   --writable-layer-size 1G \
   --expose-port 49999 \
   --expose-port 49983 \
@@ -74,8 +72,6 @@ cubemastercli tpl create-from-image \
   --probe-path /healthz \
   --env        MY_ENV=production
 ```
-
-> **镜像仓库说明：** 国内优先使用 `cube-sandbox-cn.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`；境外访问推荐使用 `cube-sandbox-int.tencentcloudcr.com/cube-sandbox/sandbox-code:latest`。
 
 ---
 

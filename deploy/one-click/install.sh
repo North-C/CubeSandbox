@@ -23,11 +23,6 @@ fi
 DEPLOY_ROLE="$(one_click_deploy_role)"
 TOOLBOX_ROOT="${ONE_CLICK_TOOLBOX_ROOT:-/usr/local/services/cubetoolbox}"
 INSTALL_PREFIX="${ONE_CLICK_INSTALL_PREFIX:-${TOOLBOX_ROOT}}"
-CUBE_PVM_ENABLE="${CUBE_PVM_ENABLE:-0}"
-case "${CUBE_PVM_ENABLE}" in
-  0|1) ;;
-  *) die "unsupported CUBE_PVM_ENABLE: ${CUBE_PVM_ENABLE} (expected 0 or 1)" ;;
-esac
 
 print_path_hint() {
   {
@@ -75,16 +70,6 @@ require_any_cmd() {
   die "requires one of commands: $*"
 }
 
-install_required_dependencies() {
-  log "checking and installing dependencies..."
-  install_ripgrep
-
-  if needs_docker_for_install; then
-    install_docker
-    install_docker_compose
-  fi
-}
-
 check_dns_preflight() {
   # up-dns/down-dns parse resolv.conf via awk.
   require_cmd awk
@@ -111,23 +96,6 @@ check_proxy_cert_preflight() {
 
 check_hardware_preflight() {
   if [[ ! -e /dev/kvm ]]; then
-    log "KVM is not supported or not enabled (/dev/kvm not found)."
-    log ""
-    log "If this host cannot expose hardware KVM (for example, it is itself a"
-    log "virtual machine without nested virtualization), you can try the"
-    log "open-source PVM stack shipped under deploy/pvm/ to turn the current"
-    log "guest into a PVM host that provides /dev/kvm to CubeSandbox:"
-    log ""
-    log "    sudo bash deploy/pvm/pvm_setup.sh"
-    log ""
-    log "That script will build and install a PVM-enabled host kernel, build a"
-    log "matching PVM guest vmlinux, and guide you through the reboot needed to"
-    log "switch into the new kernel. After reboot, re-run this installer."
-    log ""
-    log "WARNING: the open-source kvm-pvm integration is intended for"
-    log "development, evaluation and self-built experiments only. It is NOT"
-    log "suitable for production workloads -- expect reduced performance,"
-    log "limited hardware coverage and no long-term support guarantees."
     die "KVM is not supported or not enabled (/dev/kvm not found)."
   fi
 
@@ -204,20 +172,6 @@ check_install_preflight() {
   fi
 }
 
-select_installed_kernel_vmlinux() {
-  local kernel_dir="${INSTALL_PREFIX}/cube-kernel-scf"
-
-  ensure_file "${kernel_dir}/vmlinux"
-  if [[ "${CUBE_PVM_ENABLE}" != "1" ]]; then
-    log "using ordinary guest kernel: ${kernel_dir}/vmlinux"
-    return 0
-  fi
-
-  ensure_file "${kernel_dir}/vmlinux-pvm"
-  cp -f "${kernel_dir}/vmlinux-pvm" "${kernel_dir}/vmlinux"
-  log "CUBE_PVM_ENABLE=1, installed PVM guest kernel as ${kernel_dir}/vmlinux"
-}
-
 configure_tencent_docker_mirror() {
   local enable_mirror="${ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR:-0}"
   local mirror_url="${ONE_CLICK_TENCENT_DOCKER_MIRROR_URL:-https://mirror.ccs.tencentyun.com}"
@@ -280,7 +234,7 @@ else
   log "primary network interface not detected; keeping packaged Cubelet eth_name"
 fi
 
-install_required_dependencies
+install_dependencies
 check_hardware_preflight
 check_cubelet_fs_preflight
 check_install_preflight
@@ -330,7 +284,9 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/support" \
     "${INSTALL_PREFIX}/cube-shim" \
     "${INSTALL_PREFIX}/cube-kernel-scf" \
+    "${INSTALL_PREFIX}"/cube-kernel-scf-linux-* \
     "${INSTALL_PREFIX}/cube-image" \
+    "${INSTALL_PREFIX}"/cube-image-linux-* \
     "${INSTALL_PREFIX}/scripts" \
     "${INSTALL_PREFIX}/sql" \
     "${INSTALL_PREFIX}/.one-click.env"
@@ -343,14 +299,20 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/network-agent" "${INSTALL_PREFIX}/network-agent"
   copy_dir_contents "${PKG_ROOT}/Cubelet" "${INSTALL_PREFIX}/Cubelet"
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
-  copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
-  copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
+  for arch_dir in "${PKG_ROOT}"/cube-kernel-scf-linux-*; do
+    [[ -d "${arch_dir}" ]] || continue
+    copy_dir_contents "${arch_dir}" "${INSTALL_PREFIX}/$(basename "${arch_dir}")"
+  done
+  for arch_dir in "${PKG_ROOT}"/cube-image-linux-*; do
+    [[ -d "${arch_dir}" ]] || continue
+    copy_dir_contents "${arch_dir}" "${INSTALL_PREFIX}/$(basename "${arch_dir}")"
+  done
+  cp -a "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
+  cp -a "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
 fi
-
-select_installed_kernel_vmlinux
 
 mkdir -p \
   "${INSTALL_PREFIX}/cube-vs/network" \
@@ -375,7 +337,6 @@ else
   : > "${RUNTIME_ENV_FILE}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
-upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"
 fi

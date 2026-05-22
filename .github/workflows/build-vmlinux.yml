@@ -10,11 +10,12 @@ on:
 env:
   KERNEL_TAG: 6.6.119-49.6
   KERNEL_ARCHIVE_URL: https://gitee.com/OpenCloudOS/OpenCloudOS-Kernel/repository/archive/6.6.119-49.6.zip
-  VMLINUX_CACHE_PATH: kernel-cache/vmlinux
+  VMLINUX_TARGET_ARCH: amd64
+  VMLINUX_CACHE_PATH: kernel-cache/linux-amd64/vmlinux
 
 jobs:
   build:
-    runs-on: arc-runner-set-16c32g-containerd
+    runs-on: ubuntu-latest
     permissions:
       contents: read
 
@@ -27,8 +28,8 @@ jobs:
         run: |
           config_hash="$(sha256sum configs/kernel-oc9.config | awk '{print $1}')"
           echo "config_hash=${config_hash}" >> "${GITHUB_OUTPUT}"
-          echo "cache_key=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
-          echo "artifact_name=vmlinux-opencloudos-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
+          echo "cache_key=vmlinux-opencloudos-linux-${VMLINUX_TARGET_ARCH}-${KERNEL_TAG}-${config_hash}-ubuntu-latest" >> "${GITHUB_OUTPUT}"
+          echo "artifact_name=vmlinux-opencloudos-linux-${VMLINUX_TARGET_ARCH}-${KERNEL_TAG}-${config_hash}" >> "${GITHUB_OUTPUT}"
 
       - name: Install kernel build dependencies
         run: |
@@ -37,7 +38,6 @@ jobs:
             bc \
             bison \
             build-essential \
-            cpio \
             file \
             flex \
             libelf-dev \

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fmt;
 use std::fs;
+use std::io::ErrorKind;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -74,7 +75,16 @@ impl UeventMatcher for CubeVirtioBlkPciMatcher {
 
 #[instrument]
 pub fn online_device(path: &str) -> Result<()> {
-    fs::write(path, "1")?;
+    eprintln!("online_device write start: {}", path);
+    match fs::write(path, "1") {
+        Ok(_) => {
+            eprintln!("online_device write ok: {}", path);
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            eprintln!("online_device skip missing: {}", path);
+        }
+        Err(e) => return Err(e).with_context(|| format!("failed to online device at {}", path)),
+    }
     Ok(())
 }
 

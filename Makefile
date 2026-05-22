@@ -20,6 +20,19 @@ ifneq ($(wildcard $(HOME)/.git-credentials),)
 DOCKER_GIT_CRED += -v $(TMP_GIT_CREDENTIALS):$(BUILDER_CONTAINER_HOME)/.git-credentials
 endif
 
+BUILDER_ENV = \
+	-e GOPROXY \
+	-e GONOSUMDB \
+	-e GOPRIVATE \
+	-e CARGO_REGISTRIES_CRATES_IO_PROTOCOL \
+	-e CARGO_HTTP_MULTIPLEXING \
+	-e HTTP_PROXY \
+	-e HTTPS_PROXY \
+	-e NO_PROXY \
+	-e http_proxy \
+	-e https_proxy \
+	-e no_proxy
+
 .PHONY: help builder-image builder-shell builder-run prepare-builder-home prepare-tmp-git-credentials all cubemaster cubelet network-agent agent cubeapi shim manual-release web-install web-dev web-build web-preview web-lint web-api-sync web-sync-dev-env
 
 help:
@@ -50,7 +63,7 @@ help:
 	@printf "  - Run 'make builder-image' first if image %s is missing\n" "$(BUILDER_IMAGE)"
 
 builder-image:
-	docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker
+	docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) .
 
 prepare-builder-home:
 	@mkdir -p "$(BUILDER_HOME)" \
@@ -73,6 +86,7 @@ builder-shell: prepare-builder-home prepare-tmp-git-credentials
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
+		$(BUILDER_ENV) \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(DOCKER_GIT_CRED) \
@@ -89,6 +103,7 @@ builder-run: prepare-builder-home prepare-tmp-git-credentials
 		-e RUSTUP_HOME=/usr/local/rustup \
 		-e GOPATH=$(BUILDER_CONTAINER_HOME)/go \
 		-e BUILDER_CMD="$(BUILDER_CMD)" \
+		$(BUILDER_ENV) \
 		-v "$(ROOT_DIR)":/workspace \
 		-v "$(BUILDER_HOME)":$(BUILDER_CONTAINER_HOME) \
 		$(DOCKER_GIT_CRED) \
@@ -112,7 +127,7 @@ network-agent: builder-image
 
 agent: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"
-	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent /workspace/_output/bin/cube-agent'
+	$(MAKE) builder-run BUILDER_CMD='mkdir -p /workspace/_output/bin && cd /workspace/agent && make -j1 && install -m 0755 "$$(make --no-print-directory print-target-path)" /workspace/_output/bin/cube-agent'
 
 cubeapi: builder-image
 	@mkdir -p "$(OUTPUT_DIR)"

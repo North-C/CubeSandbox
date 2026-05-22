@@ -12,6 +12,58 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestUsableGatewayNeighborAcceptsStableStates(t *testing.T) {
+	states := []int{
+		unix.NUD_REACHABLE,
+		unix.NUD_STALE,
+		unix.NUD_DELAY,
+		unix.NUD_PROBE,
+		unix.NUD_PERMANENT,
+	}
+
+	for _, state := range states {
+		neigh := netlink.Neigh{
+			Family:       netlink.FAMILY_V4,
+			State:        state,
+			HardwareAddr: net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		}
+		if !usableGatewayNeighbor(neigh) {
+			t.Fatalf("state=%d should be usable", state)
+		}
+	}
+}
+
+func TestUsableGatewayNeighborRejectsUnusableStates(t *testing.T) {
+	tests := []netlink.Neigh{
+		{
+			Family:       netlink.FAMILY_V6,
+			State:        unix.NUD_REACHABLE,
+			HardwareAddr: net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		},
+		{
+			Family:       netlink.FAMILY_V4,
+			State:        unix.NUD_REACHABLE,
+			HardwareAddr: nil,
+		},
+		{
+			Family:       netlink.FAMILY_V4,
+			State:        unix.NUD_FAILED,
+			HardwareAddr: net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		},
+		{
+			Family:       netlink.FAMILY_V4,
+			State:        unix.NUD_INCOMPLETE,
+			HardwareAddr: net.HardwareAddr{0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee},
+		},
+	}
+
+	for _, neigh := range tests {
+		if usableGatewayNeighbor(neigh) {
+			t.Fatalf("neighbor=%+v should not be usable", neigh)
+		}
+	}
+}
+
 func TestEnsureRouteToCubeDev(t *testing.T) {
 	originalReplace := netlinkRouteReplace
 	originalList := netlinkRouteListFiltered

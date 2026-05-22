@@ -6,7 +6,6 @@ package cubebox
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/containerd/errdefs"
 	"github.com/google/uuid"
@@ -26,7 +25,7 @@ var update = &cli.Command{
 		}
 		reqByte, err := readAllFile(context.Args().Slice()[0])
 		if err != nil {
-			log.Printf("readAllFile err. %s", err.Error())
+			myPrint("readAllFile err. %s", err.Error())
 		}
 		req := &cubebox.UpdateCubeSandboxRequest{}
 		if err := json.Unmarshal(reqByte, &req); err != nil {
@@ -43,10 +42,10 @@ var update = &cli.Command{
 
 		resp, err := client.Update(ctx, req)
 		if err != nil {
-			log.Printf("Update err. %s", err.Error())
+			myPrint("Update err. %s", err.Error())
 			return err
 		}
-		log.Printf("Update %+v", utils.InterfaceToString(resp))
+		myPrint("Update %+v", utils.InterfaceToString(resp))
 		return nil
 	},
 }

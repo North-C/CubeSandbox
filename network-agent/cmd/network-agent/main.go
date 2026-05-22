@@ -49,7 +49,7 @@ func main() {
 	)
 	flag.Parse()
 	if err := initLogger(*logPath, *logLevel, *logRollNum, *logRollSize); err != nil {
-		CubeLog.Fatalf("network-agent init logger failed: %v", err)
+		fatalf("network-agent init logger failed: %v", err)
 	}
 
 	cfg := defaultCfg
@@ -57,7 +57,7 @@ func main() {
 		var err error
 		cfg, err = service.LoadConfigFromCubeletTOML(cfg, *cubeletConfig)
 		if err != nil {
-			CubeLog.Fatalf("network-agent load cubelet config failed: %v", err)
+			fatalf("network-agent load cubelet config failed: %v", err)
 		}
 	}
 
@@ -104,23 +104,23 @@ func main() {
 
 	svc, err := initService(cfg)
 	if err != nil {
-		CubeLog.Fatalf("network-agent init failed: %v", err)
+		fatalf("network-agent init failed: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
 	CubeLog.Infof("network-agent bootstrap health check with service: %s", describeService(svc))
 	if err := svc.Health(ctx); err != nil {
-		CubeLog.Fatalf("network-agent bootstrap health check failed: %v", err)
+		fatalf("network-agent bootstrap health check failed: %v", err)
 	}
 
 	apiServer, err := httpserver.NewEndpoint(*listenEndpoint, svc)
 	if err != nil {
-		CubeLog.Fatalf("network-agent api server init failed: %v", err)
+		fatalf("network-agent api server init failed: %v", err)
 	}
 	go func() {
 		if err := apiServer.Start(); err != nil {
-			CubeLog.Fatalf("network-agent api server failed: %v", err)
+			fatalf("network-agent api server failed: %v", err)
 		}
 	}()
 
@@ -128,11 +128,11 @@ func main() {
 	if *grpcListen != "" {
 		grpcSrv, err = grpcserver.New(*grpcListen, svc)
 		if err != nil {
-			CubeLog.Fatalf("network-agent grpc server init failed: %v", err)
+			fatalf("network-agent grpc server init failed: %v", err)
 		}
 		go func() {
 			if err := grpcSrv.Start(); err != nil {
-				CubeLog.Fatalf("network-agent grpc server failed: %v", err)
+				fatalf("network-agent grpc server failed: %v", err)
 			}
 		}()
 	}
@@ -141,11 +141,11 @@ func main() {
 	if provider, ok := svc.(service.TapFDProvider); ok && cfg.TapFDSocketPath != "" {
 		tapFDSrv, err = fdserver.New(cfg.TapFDSocketPath, provider)
 		if err != nil {
-			CubeLog.Fatalf("network-agent tap fd server init failed: %v", err)
+			fatalf("network-agent tap fd server init failed: %v", err)
 		}
 		go func() {
 			if err := tapFDSrv.Start(); err != nil {
-				CubeLog.Fatalf("network-agent tap fd server failed: %v", err)
+				fatalf("network-agent tap fd server failed: %v", err)
 			}
 		}()
 	}
@@ -153,7 +153,7 @@ func main() {
 	healthServer := httpserver.New(*healthListen, svc)
 	go func() {
 		if err := healthServer.Start(); err != nil {
-			CubeLog.Fatalf("network-agent health server failed: %v", err)
+			fatalf("network-agent health server failed: %v", err)
 		}
 	}()
 
@@ -184,6 +184,11 @@ func main() {
 	}
 }
 
+func fatalf(format string, args ...interface{}) {
+	CubeLog.Fatalf(format, args...)
+	os.Exit(1)
+}
+
 func initService(cfg service.Config) (service.Service, error) {
 	CubeLog.Infof("network-agent initService start: config={%s}", summarizeConfig(cfg))
 	svc, err := newLocalService(cfg)
@@ -212,7 +217,7 @@ func validateService(svc service.Service) error {
 
 func summarizeConfig(cfg service.Config) string {
 	return fmt.Sprintf(
-		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d tap_init_num=%d default_exposed_ports=%v state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q connect_timeout=%s",
+		"eth_name=%q object_dir=%q cidr=%q mvm_inner_ip=%q mvm_mac_addr=%q mvm_gw_dest_ip=%q mvm_gw_mac_addr=%q mvm_mask=%d mvm_mtu=%d tap_init_num=%d default_exposed_ports=%v state_dir=%q tap_fd_socket_path=%q host_proxy_bind_ip=%q disable_tso=%t disable_ufo=%t disable_check_sum=%t connect_timeout=%s",
 		cfg.EthName,
 		cfg.ObjectDir,
 		cfg.CIDR,
@@ -227,6 +232,9 @@ func summarizeConfig(cfg service.Config) string {
 		cfg.StateDir,
 		cfg.TapFDSocketPath,
 		cfg.HostProxyBindIP,
+		cfg.DisableTso,
+		cfg.DisableUfo,
+		cfg.DisableCheckSum,
 		cfg.ConnectTimeout,
 	)
 }

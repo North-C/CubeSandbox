@@ -25,6 +25,7 @@ var netlinkLinkByIndex = netlink.LinkByIndex
 var netlinkLinkByName = netlink.LinkByName
 var netlinkLinkList = netlink.LinkList
 var netlinkLinkDel = netlink.LinkDel
+var netlinkNeighList = netlink.NeighList
 var unixOpen = unix.Open
 var unixClose = unix.Close
 var unixIoctlIfreq = unix.IoctlIfreq
@@ -100,16 +101,26 @@ func getGatewayMacAddr(ifName string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	neighs, err := netlink.NeighList(link.Attrs().Index, 0)
+	neighs, err := netlinkNeighList(link.Attrs().Index, 0)
 	if err != nil {
 		return "", err
 	}
 	for _, neigh := range neighs {
-		if neigh.Family == netlink.FAMILY_V4 && neigh.State == unix.NUD_REACHABLE {
+		if usableGatewayNeighbor(neigh) {
 			return neigh.HardwareAddr.String(), nil
 		}
 	}
-	return "", fmt.Errorf("reachable gateway mac not found on %s", ifName)
+	return "", fmt.Errorf("usable gateway mac not found on %s", ifName)
+}
+
+func usableGatewayNeighbor(neigh netlink.Neigh) bool {
+	if neigh.Family != netlink.FAMILY_V4 || len(neigh.HardwareAddr) == 0 {
+		return false
+	}
+	if neigh.State&unix.NUD_FAILED != 0 || neigh.State&unix.NUD_INCOMPLETE != 0 {
+		return false
+	}
+	return neigh.State&(unix.NUD_REACHABLE|unix.NUD_STALE|unix.NUD_DELAY|unix.NUD_PROBE|unix.NUD_PERMANENT) != 0
 }
 
 func getMachineDevice(ifName string) (*machineDevice, error) {

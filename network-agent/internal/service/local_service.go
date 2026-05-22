@@ -20,6 +20,8 @@ import (
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 )
 
+var errIPExhausted = errors.New("ip exhausted")
+
 var (
 	cubevsAttachFilter = cubevs.AttachFilter
 	cubevsGetTAPDevice = cubevs.GetTAPDevice
