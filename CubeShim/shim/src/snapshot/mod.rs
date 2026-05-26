@@ -243,14 +243,8 @@ impl Snapshot {
                 ..Default::default()
             };
             let _ = vm_config.add_nets(&net)?;
-
-            //don't disable highres in eks, temporarily use tap to identify this situation
-            vm_config.add_cmdline("highres=off".to_string());
-            vm_config.add_cmdline("clocksource=kvm-clock".to_string());
-        } else {
-            vm_config.add_cmdline("clocksource=tsc".to_string());
-            vm_config.add_cmdline("tsc=reliable".to_string());
         }
+        vm_config.add_snapshot_clock_cmdlines(self.tap);
 
         let sharefs_ptr = FilePtr::new(FS_SHARE_DIR)?;
         self.sharefs_ptr = Some(sharefs_ptr);
