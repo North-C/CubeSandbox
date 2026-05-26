@@ -22,6 +22,10 @@ This directory is used to build and deliver the single-machine one-click release
 
 ## Build Inputs
 
+One-click packaging is architecture-aware. `ONE_CLICK_TARGET_ARCH` accepts
+`amd64`, `x86_64`, `arm64`, `aarch64`, `linux/amd64`, and `linux/arm64`, and
+defaults to the build host architecture when unset.
+
 The required fixed kernel artifact is the ordinary guest kernel `vmlinux`. A PVM guest kernel can also be packaged as `vmlinux-pvm`:
 
 - `vmlinux`
@@ -30,11 +34,35 @@ The required fixed kernel artifact is the ordinary guest kernel `vmlinux`. A PVM
 By default they are placed under `assets/kernel-artifacts/`, but can be overridden via environment variables:
 
 ```bash
+export ONE_CLICK_TARGET_ARCH=arm64
 export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_CONFIG=/abs/path/to/kernel-oc9-arm64.config
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-The installed runtime still uses `cube-kernel-scf/vmlinux`. By default that file is the ordinary guest kernel. If the target machine sets `CUBE_PVM_ENABLE=1` during installation, the installer copies the packaged `vmlinux-pvm` over `cube-kernel-scf/vmlinux`.
+For ARM64, `ONE_CLICK_CUBE_KERNEL_VMLINUX` should point to the Linux
+`arch/arm64/boot/Image` produced by the guest kernel build. If
+`ONE_CLICK_CUBE_KERNEL_CONFIG` is available, packaging validates that the config
+contains the required CubeSandbox guest options including `CONFIG_DEVMEM=y` and
+memory cgroup support.
+
+The package stores guest assets under architecture-qualified directories:
+
+```text
+cube-kernel-scf-linux-<arch>/vmlinux
+cube-image-linux-<arch>/cube-guest-image-cpu.img
+```
+
+The installer keeps compatibility symlinks:
+
+```text
+cube-kernel-scf -> cube-kernel-scf-linux-<arch>
+cube-image -> cube-image-linux-<arch>
+```
+
+If the target machine sets `CUBE_PVM_ENABLE=1` during installation, the
+installer copies the packaged `vmlinux-pvm` over
+`cube-kernel-scf-linux-<arch>/vmlinux`.
 
 The guest image no longer depends on a local zip file. Instead, it is generated locally from `deploy/guest-image/Dockerfile` during the one-click release package build. Common override parameters:
 
@@ -42,10 +70,22 @@ The guest image no longer depends on a local zip file. Instead, it is generated 
 export ONE_CLICK_GUEST_IMAGE_DOCKERFILE=/abs/path/to/cube-sandbox/deploy/guest-image/Dockerfile
 # Optional; defaults to the directory containing the Dockerfile
 export ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR=/abs/path/to/cube-sandbox/deploy/guest-image
+# Optional; defaults to TencentOS for amd64 and openEuler 24.03 LTS SP3 for arm64
+export ONE_CLICK_GUEST_IMAGE_BASE_REF=openeuler/openeuler:24.03-lts-sp3
 # Optional; defaults to cube-sandbox-guest-image:one-click
 export ONE_CLICK_GUEST_IMAGE_REF=cube-sandbox-guest-image:one-click
 # Optional; defaults to the current repository revision
 export ONE_CLICK_GUEST_IMAGE_VERSION=custom-guest-image-version
+```
+
+Support-service images are also architecture-aware at install time. By
+default, `amd64` keeps the Tencent mirror MySQL/Redis images, while `arm64`
+uses the multi-arch upstream `mysql:8.0` and `redis:7-alpine` images. Override
+them in `.env` when a private registry is required:
+
+```bash
+export CUBE_SANDBOX_MYSQL_IMAGE=mysql:8.0
+export CUBE_SANDBOX_REDIS_IMAGE=redis:7-alpine
 ```
 
 ## Building the Release Package
@@ -66,6 +106,9 @@ Run the following from the repository root on the host machine (recommended):
 This entry point will:
 
 - Compile `cubemaster`, `cubemastercli`, `cubelet`, `cubecli`, `cube-api`, `network-agent`, `cube-agent`, `containerd-shim-cube-rs`, and `cube-runtime` inside a container using the root-level builder image.
+- Build Go binaries, the guest image Docker rootfs, and the `cube-agent` musl
+  target for `ONE_CLICK_TARGET_ARCH`; this prevents ARM64 packages from
+  depending on a hand-replaced guest `/sbin/init`.
 - Run `go mod download` for `CubeMaster` and `Cubelet` inside the builder. The first build will fetch Go modules online; subsequent builds reuse the module cache under the builder's HOME directory.
 - Place the pre-built artifacts in `deploy/one-click/.work/prebuilt/`.
 - Return to the host machine and call `build-release-bundle.sh` to build the WebUI static assets, continue with guest image generation, and finish final packaging.
@@ -102,11 +145,12 @@ The release package contains:
 - `sandbox-package.tar.gz`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`, `cube-runtime`
-- Locally built `cube-image/cube-guest-image-cpu.img`
+- Locally built `cube-image-linux-<arch>/cube-guest-image-cpu.img` plus the
+  compatibility `cube-image` symlink
 - `cubeproxy/` directory and its build context
 - `support/` directory and its compose templates
 - `webui/` directory, its compose template, nginx configuration, and built `web/dist` assets
-- `cube-kernel-scf.zip` packaged on the fly from `vmlinux`
+- `cube-kernel-scf.zip` packaged on the fly from the selected guest kernel
 - `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh` ready to run on the target machine
 
 ## Configuration Mapping
@@ -122,7 +166,7 @@ One-click does not create an extra global `configs/` layer on the target machine
 - `cubeproxy/` → `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` → `/usr/local/services/cubetoolbox/webui/`
 
-`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and managed by the local `docker compose` on the target machine. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy` and built and started locally via `docker compose build && up`. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway`.
+`Cubelet` uses the existing `dynamicconf/conf.yaml` from the repository as-is. At runtime, `network-agent` preferentially reads the network plugin configuration from `Cubelet/config/config.toml` via `--cubelet-config` to stay consistent with `Cubelet`'s network parameters. `cube-api` reads environment variables directly from `.one-click.env` on startup, listening on `0.0.0.0:3000` by default and forwarding to the local `cubemaster`. MySQL/Redis are always deployed to `/usr/local/services/cubetoolbox/support` and managed by the local `docker compose` on the target machine. Before `cubemaster` starts, one-click rewrites `CubeMaster/conf.yaml` so `ossdb_config`, `instance_db_config`, `redis`, `redis_read`, and `redis_write` point at the configured support-service ports and credentials. Override `CUBEMASTER_MYSQL_ADDR` or `CUBEMASTER_REDIS_ADDR` only when `cubemaster` should use an external store. `cube proxy` is always deployed to `/usr/local/services/cubetoolbox/cubeproxy` and built and started locally via `docker compose build && up`. WebUI is deployed to `/usr/local/services/cubetoolbox/webui`, listens on `12088` by default, serves the packaged `webui/dist` directory through a standard nginx container, and proxies `/cubeapi` to CubeAPI through Docker `host-gateway`.
 
 ## Target Machine Installation
 
@@ -222,10 +266,12 @@ Other common parameters:
 
 ```bash
 CUBE_PROXY_HOST_PORT=443
+CUBE_PROXY_BASE_IMAGE=openresty/openresty:1.21.4.1-6-alpine-fat
 CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
+CUBE_PROXY_COREDNS_IMAGE=coredns/coredns:1.14.2
 WEB_UI_ENABLE=1
-WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+WEB_UI_IMAGE=openresty/openresty:1.21.4.1-6-alpine-fat
 WEB_UI_HOST_PORT=12088
 WEB_UI_UPSTREAM=http://host.docker.internal:3000
 CUBE_API_BIND=0.0.0.0:3000
@@ -235,13 +281,13 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 
 During installation, the following steps are performed:
 
-- If `mkcert` is not already installed on the system, it is copied from the bundled `support/bin/mkcert` to `/usr/local/bin/mkcert`. Then `mkcert -install` is run on the host under `CUBE_PROXY_CERT_DIR` (default `/usr/local/services/cubetoolbox/cubeproxy/certs/`) to generate `cube.app+3.pem` and `cube.app+3-key.pem`.
+- If a runnable `mkcert` is available, it is used under `CUBE_PROXY_CERT_DIR` (default `/usr/local/services/cubetoolbox/cubeproxy/certs/`) to generate `cube.app+3.pem` and `cube.app+3-key.pem`. If the bundled `mkcert` is not runnable on the target architecture, the installer falls back to `openssl` and generates a local SAN certificate for `cube.app`, `*.cube.app`, `localhost`, and `127.0.0.1`.
 - A `docker-compose.yaml` is rendered under `/usr/local/services/cubetoolbox/support/` and MySQL/Redis are started.
 - `cubeproxy/global.conf` is rendered using `CUBE_SANDBOX_NODE_IP`.
-- A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`, and `CubeProxy/Dockerfile` from the bundled build context is used for the local `cube proxy` image build.
-- A `CoreDNS` container is started. If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
+- A `docker-compose.yaml` is generated under `/usr/local/services/cubetoolbox/cubeproxy/`. The host's `CUBE_PROXY_CERT_DIR` is mounted read-only into the container at `/usr/local/openresty/nginx/certs/`, and `CubeProxy/Dockerfile` from the bundled build context is used for the local `cube proxy` image build. The proxy base image is architecture-aware: `amd64` defaults to the Tencent OpenResty mirror and `arm64` defaults to `openresty/openresty:1.21.4.1-6-alpine-fat`.
+- A `CoreDNS` container is started. The image is architecture-aware: `amd64` defaults to the Tencent CoreDNS mirror and `arm64` defaults to `coredns/coredns:1.14.2`. If `resolvectl` is available, one-click creates a dedicated dummy link (default `cube-dns0`) with a local address, binds CoreDNS to `169.254.254.53` on that link by default, and routes `cube.app` through the link without affecting the host's default public DNS path. If `resolvectl` is unavailable on the target machine, the installer falls back to `NetworkManager + dnsmasq`, continuing to use `127.0.0.54` by default.
 - Host processes `network-agent`, `cubemaster`, `cube-api`, and `cubelet` are started, and `cube-api /health` is verified in `quickcheck.sh`.
-- A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
+- A standard WebUI nginx container is started under `/usr/local/services/cubetoolbox/webui/`. Its image is architecture-aware, using the Tencent OpenResty mirror on `amd64` and upstream OpenResty on `arm64` by default. It mounts `webui/dist` as read-only static content, publishes `WEB_UI_HOST_PORT` (`12088` by default), maps `host.docker.internal` to Docker `host-gateway`, and verifies `/cubeapi/v1/health` through the nginx reverse proxy.
 
 Stopping one-click will simultaneously stop MySQL/Redis under `/usr/local/services/cubetoolbox/support`, WebUI, `cube proxy` / `CoreDNS`, and the host processes `network-agent` / `cubemaster` / `cube-api` / `cubelet`, and will roll back the host DNS routing configuration for `cube.app`.
 
@@ -291,7 +337,7 @@ Required commands:
 
 One-of-two commands:
 
-- Certificate preparation: `mkcert` (bundled in the release package; auto-installed from the package if not present on the system).
+- Certificate preparation: runnable `mkcert`, or `openssl` fallback when `mkcert` is unavailable for the target architecture.
 - DNS split routing: `resolvectl`, or `systemctl + NetworkManager`.
 - If `dnsmasq` is missing and the `NetworkManager` fallback path is taken, one of the following package managers is also required: `dnf` / `yum` / `apt-get`.
 
@@ -304,7 +350,7 @@ Conditional commands:
 - The target machine requires `root` privileges.
 - The target machine preferentially uses `systemd-resolved` / `resolvectl` for split DNS of `cube.app`. The current implementation creates a dedicated dummy link (default `cube-dns0`), assigns it a local `/32` address, binds CoreDNS to `169.254.254.53` on that link by default, and attaches that address plus `~cube.app` to the link. If that capability is unavailable, the installation script will attempt to fall back to `NetworkManager + dnsmasq`, using `127.0.0.54` by default.
 - The target machine pulls `mysql:8.0` and `redis:7-alpine` from the internet by default.
-- The `mkcert` binary is bundled in the release package (`support/bin/mkcert`). If `mkcert` is not pre-installed on the system, it is automatically copied from the package to `/usr/local/bin/mkcert` — no internet download required.
+- The release package includes a bundled `mkcert` (`support/bin/mkcert`) for compatibility. On targets where it is not runnable, one-click uses the host `openssl` command to generate the local cube proxy certificate instead.
 - TLS certificates and private keys for `cube proxy` are stored on the host under `CUBE_PROXY_CERT_DIR` and mounted read-only into the container via `docker compose`. After updating certificates, simply restart `cube-proxy` or reload nginx inside the container — no image rebuild required.
 - The recommended entry point `build-release-bundle-builder.sh` requires the host machine to have `docker`, `make`, `tar`, `python3`, `truncate`, `ldd`, `mkfs.ext4`, and similar tools.
 - The recommended entry point only runs component compilation inside the builder; guest image generation and final packaging are still performed on the host machine.

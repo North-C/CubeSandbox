@@ -22,6 +22,10 @@
 
 ## 构建输入
 
+one-click 打包现在会感知目标架构。`ONE_CLICK_TARGET_ARCH` 支持
+`amd64`、`x86_64`、`arm64`、`aarch64`、`linux/amd64`、`linux/arm64`；
+未设置时默认使用构建机架构。
+
 必须准备的固定 kernel 制品是普通 guest kernel `vmlinux`，也可以额外打包 PVM guest kernel `vmlinux-pvm`：
 
 - `vmlinux`
@@ -30,11 +34,33 @@
 默认放在 `assets/kernel-artifacts/`，也可以通过环境变量覆盖：
 
 ```bash
+export ONE_CLICK_TARGET_ARCH=arm64
 export ONE_CLICK_CUBE_KERNEL_VMLINUX=/abs/path/to/vmlinux
+export ONE_CLICK_CUBE_KERNEL_CONFIG=/abs/path/to/kernel-oc9-arm64.config
 export ONE_CLICK_CUBE_KERNEL_PVM_VMLINUX=/abs/path/to/vmlinux-pvm
 ```
 
-运行时仍然使用 `cube-kernel-scf/vmlinux`。默认情况下该文件是普通 guest kernel；如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的 `vmlinux-pvm` 覆盖安装为 `cube-kernel-scf/vmlinux`。
+ARM64 场景下，`ONE_CLICK_CUBE_KERNEL_VMLINUX` 应指向 Linux
+`arch/arm64/boot/Image`。如果提供 `ONE_CLICK_CUBE_KERNEL_CONFIG`，打包阶段会
+校验其中包含 `CONFIG_DEVMEM=y` 和 memory cgroup 等 CubeSandbox guest 必需
+配置。
+
+发布包内的 guest assets 使用架构限定目录：
+
+```text
+cube-kernel-scf-linux-<arch>/vmlinux
+cube-image-linux-<arch>/cube-guest-image-cpu.img
+```
+
+安装后仍保留兼容 symlink：
+
+```text
+cube-kernel-scf -> cube-kernel-scf-linux-<arch>
+cube-image -> cube-image-linux-<arch>
+```
+
+如果目标机安装时设置 `CUBE_PVM_ENABLE=1`，安装脚本会把包内的
+`vmlinux-pvm` 覆盖安装为 `cube-kernel-scf-linux-<arch>/vmlinux`。
 
 guest image 不再依赖本地 zip，而是在构建 one-click 发布包时基于 `deploy/guest-image/Dockerfile` 本地生成。常用覆盖参数如下：
 
@@ -42,10 +68,21 @@ guest image 不再依赖本地 zip，而是在构建 one-click 发布包时基�
 export ONE_CLICK_GUEST_IMAGE_DOCKERFILE=/abs/path/to/cube-sandbox/deploy/guest-image/Dockerfile
 # 可选，默认取 Dockerfile 所在目录
 export ONE_CLICK_GUEST_IMAGE_CONTEXT_DIR=/abs/path/to/cube-sandbox/deploy/guest-image
+# 可选，默认 amd64 使用 TencentOS，arm64 使用 openEuler 24.03 LTS SP3
+export ONE_CLICK_GUEST_IMAGE_BASE_REF=openeuler/openeuler:24.03-lts-sp3
 # 可选，默认是 cube-sandbox-guest-image:one-click
 export ONE_CLICK_GUEST_IMAGE_REF=cube-sandbox-guest-image:one-click
 # 可选，默认跟随当前仓库 revision
 export ONE_CLICK_GUEST_IMAGE_VERSION=custom-guest-image-version
+```
+
+安装阶段的支撑服务镜像也会感知架构。默认情况下，`amd64` 继续使用腾讯云
+mirror 的 MySQL/Redis 镜像，`arm64` 使用多架构上游镜像 `mysql:8.0` 和
+`redis:7-alpine`。如果需要私有镜像仓库，可以在 `.env` 中覆盖：
+
+```bash
+export CUBE_SANDBOX_MYSQL_IMAGE=mysql:8.0
+export CUBE_SANDBOX_REDIS_IMAGE=redis:7-alpine
 ```
 
 ## 构建发布包
@@ -66,6 +103,9 @@ cp env.example .env
 这个入口会先：
 
 - 通过根目录 builder 镜像在容器内编译 `cubemaster`、`cubemastercli`、`cubelet`、`cubecli`、`cube-api`、`network-agent`、`cube-agent`、`containerd-shim-cube-rs`、`cube-runtime`
+- 根据 `ONE_CLICK_TARGET_ARCH` 构建 Go 二进制、guest image Docker rootfs
+  和 `cube-agent` musl target，避免 ARM64 包依赖手工替换 guest
+  `/sbin/init`
 - 在 builder 内对 `CubeMaster`、`Cubelet` 执行 `go mod download`，首次构建会在线拉取 Go modules，后续复用 builder HOME 下的模块缓存
 - 将预编译产物落到 `deploy/one-click/.work/prebuilt/`
 - 回到宿主机调用 `build-release-bundle.sh`，构建 WebUI 静态资源，继续 guest image 和最终打包
@@ -102,11 +142,12 @@ deploy/one-click/dist/cube-sandbox-one-click-<version>.tar.gz
 - `sandbox-package.tar.gz`
 - `CubeAPI/bin/cube-api`
 - `containerd-shim-cube-rs`、`cube-runtime`
-- 本地构建得到的 `cube-image/cube-guest-image-cpu.img`
+- 本地构建得到的 `cube-image-linux-<arch>/cube-guest-image-cpu.img` 以及兼容
+  `cube-image` symlink
 - `cubeproxy/` 目录及其 `build-context`
 - `support/` 目录及其 compose 模板
 - `webui/` 目录、compose 模板、nginx 配置和已构建的 `web/dist` 静态资源
-- 基于 `vmlinux` 现场打包得到的 `cube-kernel-scf.zip`
+- 基于目标架构 guest kernel 现场打包得到的 `cube-kernel-scf.zip`
 - 目标机可直接执行的 `install.sh` / `install-compute.sh` / `down.sh` / `smoke.sh`
 
 ## 配置映射
@@ -122,7 +163,7 @@ one-click 不会在目标机额外创建一层全局 `configs/`，而是直接�
 - `cubeproxy/` -> `/usr/local/services/cubetoolbox/cubeproxy/`
 - `webui/` -> `/usr/local/services/cubetoolbox/webui/`
 
-其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，由目标机本地 `docker compose` 管理；`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，在目标机本地 `docker compose build && up`。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI。
+其中 `Cubelet` 直接使用仓库内现成的 `dynamicconf/conf.yaml`；`network-agent` 实际启动时优先通过 `--cubelet-config` 读取 `Cubelet/config/config.toml` 中的网络插件配置，以保证和 `Cubelet` 的网络参数保持一致；`cube-api` 则直接读取 `.one-click.env` 中的环境变量启动，默认监听 `0.0.0.0:3000` 并转发到本机 `cubemaster`。MySQL/Redis 固定部署到 `/usr/local/services/cubetoolbox/support`，由目标机本地 `docker compose` 管理；`cubemaster` 启动前，one-click 会改写 `CubeMaster/conf.yaml`，让 `ossdb_config`、`instance_db_config`、`redis`、`redis_read`、`redis_write` 指向当前配置的支撑服务端口和账号密码。仅当需要让 `cubemaster` 连接外部存储时，才需要覆盖 `CUBEMASTER_MYSQL_ADDR` 或 `CUBEMASTER_REDIS_ADDR`。`cube proxy` 固定部署到 `/usr/local/services/cubetoolbox/cubeproxy`，在目标机本地 `docker compose build && up`。WebUI 固定部署到 `/usr/local/services/cubetoolbox/webui`，默认监听 `12088`，通过标准 nginx 容器托管发布包里的 `webui/dist`，并通过 Docker `host-gateway` 把 `/cubeapi` 反代到宿主机 CubeAPI。
 
 ## 目标机安装
 
@@ -222,10 +263,12 @@ CUBE_PROXY_DNS_ENABLE=1
 
 ```bash
 CUBE_PROXY_HOST_PORT=443
+CUBE_PROXY_BASE_IMAGE=openresty/openresty:1.21.4.1-6-alpine-fat
 CUBE_PROXY_CERT_DIR="${ONE_CLICK_INSTALL_PREFIX}/cubeproxy/certs"
 CUBE_PROXY_DNS_ANSWER_IP="${CUBE_SANDBOX_NODE_IP}"
+CUBE_PROXY_COREDNS_IMAGE=coredns/coredns:1.14.2
 WEB_UI_ENABLE=1
-WEB_UI_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+WEB_UI_IMAGE=openresty/openresty:1.21.4.1-6-alpine-fat
 WEB_UI_HOST_PORT=12088
 WEB_UI_UPSTREAM=http://host.docker.internal:3000
 CUBE_API_BIND=0.0.0.0:3000
@@ -235,13 +278,13 @@ CUBE_API_SANDBOX_DOMAIN=cube.app
 
 安装过程中会做这些事：
 
-- 若系统尚未安装 `mkcert`，从安装包内置的 `support/bin/mkcert` 复制到 `/usr/local/bin/mkcert`，再在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下执行 `mkcert -install` 并生成 `cube.app+3.pem`、`cube.app+3-key.pem`
+- 若目标机存在可执行的 `mkcert`，则在宿主机 `CUBE_PROXY_CERT_DIR`（默认 `/usr/local/services/cubetoolbox/cubeproxy/certs/`）下生成 `cube.app+3.pem`、`cube.app+3-key.pem`；若内置 `mkcert` 与目标架构不匹配无法执行，则回退使用 `openssl` 生成覆盖 `cube.app`、`*.cube.app`、`localhost`、`127.0.0.1` 的本地 SAN 证书
 - 在 `/usr/local/services/cubetoolbox/support/` 下生成 `docker-compose.yaml` 并启动 MySQL/Redis
 - 用 `CUBE_SANDBOX_NODE_IP` 渲染 `cubeproxy/global.conf`
-- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，并使用发布包 build context 中来自 `CubeProxy/Dockerfile` 的标准 Dockerfile 本地构建 `cube proxy` 镜像
-- 启动 `CoreDNS` 容器；若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS，避免污染宿主机默认公网 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
+- 在 `/usr/local/services/cubetoolbox/cubeproxy/` 下生成 `docker-compose.yaml`，把宿主机 `CUBE_PROXY_CERT_DIR` 只读挂载到容器内 `/usr/local/openresty/nginx/certs/`，并使用发布包 build context 中来自 `CubeProxy/Dockerfile` 的标准 Dockerfile 本地构建 `cube proxy` 镜像；proxy base image 会感知架构，`amd64` 默认使用腾讯云 OpenResty mirror，`arm64` 默认使用 `openresty/openresty:1.21.4.1-6-alpine-fat`
+- 启动 `CoreDNS` 容器；镜像默认值会感知架构，`amd64` 默认使用腾讯云 CoreDNS mirror，`arm64` 默认使用 `coredns/coredns:1.14.2`。若目标机有 `resolvectl`，则创建专用 dummy link（默认 `cube-dns0`）并分配本地地址，`CoreDNS` 默认绑定到该链路地址 `169.254.254.53`，再把 `cube.app` 域名通过该链路路由到本地 DNS，避免污染宿主机默认公网 DNS；若目标机没有 `resolvectl`，则回退到 `NetworkManager + dnsmasq`，默认继续使用 `127.0.0.54`
 - 启动宿主机进程 `network-agent`、`cubemaster`、`cube-api`、`cubelet`，并在 `quickcheck.sh` 中校验 `cube-api /health`
-- 在 `/usr/local/services/cubetoolbox/webui/` 下启动标准 WebUI nginx 容器。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
+- 在 `/usr/local/services/cubetoolbox/webui/` 下启动标准 WebUI nginx 容器；镜像默认值会感知架构，`amd64` 默认使用腾讯云 OpenResty mirror，`arm64` 默认使用上游 OpenResty。该容器只读挂载 `webui/dist` 静态资源，发布 `WEB_UI_HOST_PORT`（默认 `12088`），把 `host.docker.internal` 映射到 Docker `host-gateway`，并通过 nginx 反代校验 `/cubeapi/v1/health`
 
 停止 one-click 时会同时停止 `/usr/local/services/cubetoolbox/support` 下的 MySQL/Redis、WebUI、`cube proxy` / `CoreDNS`、宿主机进程 `network-agent` / `cubemaster` / `cube-api` / `cubelet`，并回滚 `cube.app` 的宿主机 DNS 路由配置。
 
@@ -291,7 +334,7 @@ export E2B_API_KEY=dummy
 
 二选一命令：
 
-- 证书准备阶段：`mkcert`（已内置在安装包中，若系统无此命令会自动从包内安装）
+- 证书准备阶段：目标架构可执行的 `mkcert`，或在 `mkcert` 不可用时回退使用 `openssl`
 - DNS 分流阶段：`resolvectl`，或 `systemctl + NetworkManager`
 - 若缺少 `dnsmasq` 且走 `NetworkManager` 回退路径，还需包管理器之一：`dnf` / `yum` / `apt-get`
 
@@ -304,7 +347,7 @@ export E2B_API_KEY=dummy
 - 目标机需要 `root` 权限。
 - 目标机优先使用 `systemd-resolved` / `resolvectl` 做 `cube.app` 的 split DNS；当前实现会创建专用 dummy link（默认 `cube-dns0`）并为其添加本地 `/32` 地址，`CoreDNS` 默认绑定到 `169.254.254.53`，再把该地址和 `~cube.app` 绑定到该链路。若该能力不可用，则安装脚本会尝试回退到 `NetworkManager + dnsmasq`，默认使用 `127.0.0.54`。
 - 目标机默认联网拉取 `mysql:8.0` 和 `redis:7-alpine`。
-- `mkcert` 二进制已内置在发布包中（`support/bin/mkcert`），安装时若系统未预装 `mkcert`，会自动从包内复制到 `/usr/local/bin/mkcert`，无需联网下载。
+- 发布包内仍包含兼容用 `mkcert`（`support/bin/mkcert`）；当它在目标架构上不可执行时，one-click 会使用宿主机 `openssl` 生成本地 cube proxy 证书。
 - `cube proxy` 的 TLS 证书和私钥保存在宿主机 `CUBE_PROXY_CERT_DIR`，并通过 `docker compose` 以只读方式挂载进容器；更新证书后无需重建镜像，只需重启 `cube-proxy` 或在容器内 reload nginx。
 - 推荐入口 `build-release-bundle-builder.sh` 需要宿主机具备 `docker` / `make` / `tar` / `python3` / `truncate` / `ldd` / `mkfs.ext4` 等工具。
 - 推荐入口只把组件编译放进 builder；guest image 与最终打包仍在宿主机执行。

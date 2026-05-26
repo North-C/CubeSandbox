@@ -22,6 +22,7 @@ COREDNS_COMPOSE_TEMPLATE="${COREDNS_DIR}/docker-compose.yaml.template"
 COREDNS_COMPOSE_FILE="${COREDNS_DIR}/docker-compose.yaml"
 RESOLV_UPSTREAM_PATH="${COREDNS_DIR}/resolv.conf.upstream"
 COREDNS_CONTAINER="${CUBE_PROXY_COREDNS_CONTAINER:-cube-proxy-coredns}"
+COREDNS_IMAGE=""
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 DNS_ANSWER_IP="${CUBE_PROXY_DNS_ANSWER_IP:-${CUBE_SANDBOX_NODE_IP:-127.0.0.1}}"
 DEFAULT_COREDNS_BIND_ADDR="${CUBE_PROXY_COREDNS_BIND_ADDR:-127.0.0.54}"
@@ -41,6 +42,43 @@ if command -v resolvectl >/dev/null 2>&1; then
   HOST_DNS_BACKEND="systemd-resolved"
   COREDNS_BIND_ADDR="${RESOLVED_COREDNS_BIND_ADDR}"
 fi
+
+normalize_one_click_arch() {
+  local raw="${1:-}"
+  case "${raw}" in
+    amd64|x86_64|linux/amd64|linux-amd64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64|linux/arm64|linux-arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported one-click target arch: ${raw:-<empty>} (expected amd64 or arm64)"
+      ;;
+  esac
+}
+
+detect_host_one_click_arch() {
+  normalize_one_click_arch "$(uname -m)"
+}
+
+dns_target_arch() {
+  if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+    normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}"
+    return 0
+  fi
+
+  detect_host_one_click_arch
+}
+
+default_coredns_image() {
+  case "$(dns_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2\n' ;;
+    arm64) printf 'coredns/coredns:1.14.2\n' ;;
+  esac
+}
+
+COREDNS_IMAGE="${CUBE_PROXY_COREDNS_IMAGE:-$(default_coredns_image)}"
 
 networkmanager_available() {
   command -v systemctl >/dev/null 2>&1 || return 1
@@ -156,6 +194,7 @@ sed \
   "${COREFILE_TEMPLATE}" > "${COREFILE_PATH}"
 
 sed \
+  -e "s#__COREDNS_IMAGE__#${COREDNS_IMAGE//\//\\/}#g" \
   -e "s/__COREDNS_CONTAINER__/${COREDNS_CONTAINER//\//\\/}/g" \
   -e "s#__COREDNS_DIR__#${COREDNS_DIR//\//\\/}#g" \
   "${COREDNS_COMPOSE_TEMPLATE}" > "${COREDNS_COMPOSE_FILE}"

@@ -77,6 +77,152 @@ latest_git_revision() {
   date +%Y%m%d-%H%M%S
 }
 
+normalize_one_click_arch() {
+  local raw="${1:-}"
+  case "${raw}" in
+    amd64|x86_64|linux/amd64|linux-amd64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64|linux/arm64|linux-arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported one-click target arch: ${raw:-<empty>} (expected amd64 or arm64)"
+      ;;
+  esac
+}
+
+detect_host_one_click_arch() {
+  normalize_one_click_arch "$(uname -m)"
+}
+
+one_click_target_arch() {
+  if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+    normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}"
+    return 0
+  fi
+
+  detect_host_one_click_arch
+}
+
+one_click_linux_platform() {
+  local arch="$1"
+  printf 'linux/%s\n' "$(normalize_one_click_arch "${arch}")"
+}
+
+one_click_rust_musl_triple() {
+  local arch
+  arch="$(normalize_one_click_arch "$1")"
+  case "${arch}" in
+    amd64) printf 'x86_64-unknown-linux-musl\n' ;;
+    arm64) printf 'aarch64-unknown-linux-musl\n' ;;
+  esac
+}
+
+one_click_default_guest_image_base_ref() {
+  local arch
+  arch="$(normalize_one_click_arch "$1")"
+  case "${arch}" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/tencentos4-minimal:4.4-v20250331\n' ;;
+    arm64) printf 'openeuler/openeuler:24.03-lts-sp3\n' ;;
+  esac
+}
+
+one_click_default_kernel_vmlinux() {
+  local artifact_dir="$1"
+  local arch
+  arch="$(normalize_one_click_arch "$2")"
+
+  if [[ -f "${artifact_dir}/linux-${arch}/vmlinux" ]]; then
+    printf '%s\n' "${artifact_dir}/linux-${arch}/vmlinux"
+    return 0
+  fi
+
+  printf '%s\n' "${artifact_dir}/vmlinux"
+}
+
+one_click_default_pvm_vmlinux() {
+  local artifact_dir="$1"
+  local arch
+  arch="$(normalize_one_click_arch "$2")"
+
+  if [[ -f "${artifact_dir}/linux-${arch}/vmlinux-pvm" ]]; then
+    printf '%s\n' "${artifact_dir}/linux-${arch}/vmlinux-pvm"
+    return 0
+  fi
+
+  printf '%s\n' "${artifact_dir}/vmlinux-pvm"
+}
+
+one_click_default_kernel_config() {
+  local artifact_dir="$1"
+  local arch
+  local kernel_path="$3"
+  local kernel_dir
+  arch="$(normalize_one_click_arch "$2")"
+  kernel_dir="$(dirname "${kernel_path}")"
+
+  local candidate
+  local candidates=(
+    "${kernel_dir}/kernel-oc9-${arch}.config"
+    "${kernel_dir}/kernel-oc9.config"
+    "${artifact_dir}/linux-${arch}/kernel-oc9-${arch}.config"
+    "${artifact_dir}/linux-${arch}/kernel-oc9.config"
+    "${artifact_dir}/kernel-oc9-${arch}.config"
+    "${artifact_dir}/kernel-oc9.config"
+  )
+  if [[ "${arch}" == "arm64" ]]; then
+    candidates=(
+      "${kernel_dir}/kernel-oc9-arm64.config"
+      "${candidates[@]}"
+      "${artifact_dir}/linux-arm64/kernel-oc9-arm64.config"
+      "${artifact_dir}/kernel-oc9-arm64.config"
+    )
+  fi
+
+  for candidate in "${candidates[@]}"; do
+    if [[ -f "${candidate}" ]]; then
+      printf '%s\n' "${candidate}"
+      return 0
+    fi
+  done
+}
+
+validate_one_click_file_arch() {
+  local path="$1"
+  local expected_arch="$2"
+  local description="$3"
+  local file_output
+
+  require_cmd file
+  ensure_file "${path}"
+  expected_arch="$(normalize_one_click_arch "${expected_arch}")"
+  file_output="$(file -L "${path}")"
+  case "${expected_arch}" in
+    amd64)
+      [[ "${file_output}" == *"x86-64"* || "${file_output}" == *"x86_64"* ]] || \
+        die "${description} is not amd64: ${file_output}"
+      ;;
+    arm64)
+      [[ "${file_output}" == *"ARM aarch64"* || "${file_output}" == *"aarch64"* || "${file_output}" == *"ARM64"* ]] || \
+        die "${description} is not arm64: ${file_output}"
+      ;;
+  esac
+  log "${description}: ${file_output}"
+}
+
+ensure_native_one_click_build_arch() {
+  local expected_arch="$1"
+  local component="$2"
+  local host_arch
+
+  expected_arch="$(normalize_one_click_arch "${expected_arch}")"
+  host_arch="$(detect_host_one_click_arch)"
+  if [[ "${host_arch}" != "${expected_arch}" ]]; then
+    die "${component} local build requires a native ${expected_arch} builder; current host is ${host_arch}. Use prebuilt ONE_CLICK_*_BIN overrides or build on a native ${expected_arch} host."
+  fi
+}
+
 container_exists() {
   local name="$1"
   docker ps -a --format '{{.Names}}' | rg -x "${name}" >/dev/null 2>&1

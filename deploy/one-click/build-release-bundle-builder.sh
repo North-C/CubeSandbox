@@ -14,6 +14,9 @@ fi
 PREBUILT_DIR="${SCRIPT_DIR}/.work/prebuilt"
 HELPER_SCRIPT="${SCRIPT_DIR}/.work/build-prebuilt-in-builder.sh"
 BUILDER_IMAGE_REF="${BUILDER_IMAGE:-cube-sandbox-builder:latest}"
+TARGET_ARCH="$(one_click_target_arch)"
+TARGET_PLATFORM="$(one_click_linux_platform "${TARGET_ARCH}")"
+RUST_MUSL_TRIPLE="$(one_click_rust_musl_triple "${TARGET_ARCH}")"
 
 require_cmd docker
 require_cmd make
@@ -26,6 +29,9 @@ cat > "${HELPER_SCRIPT}" <<'EOF'
 set -euo pipefail
 
 PREBUILT_DIR="/workspace/deploy/one-click/.work/prebuilt"
+TARGET_ARCH="${ONE_CLICK_TARGET_ARCH:?}"
+TARGET_PLATFORM="${ONE_CLICK_TARGET_PLATFORM:?}"
+RUST_MUSL_TRIPLE="${ONE_CLICK_RUST_MUSL_TRIPLE:?}"
 mkdir -p "${PREBUILT_DIR}"
 rm -f \
   "${PREBUILT_DIR}/cubemaster" \
@@ -39,29 +45,44 @@ rm -f \
   "${PREBUILT_DIR}/cube-runtime"
 
 echo "[one-click] building cubemaster in builder" >&2
-(cd /workspace/CubeMaster && go mod download && go build -o "${PREBUILT_DIR}/cubemaster" ./cmd/cubemaster)
+(cd /workspace/CubeMaster && go mod download && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${PREBUILT_DIR}/cubemaster" ./cmd/cubemaster)
 
 echo "[one-click] building cubemastercli in builder" >&2
-(cd /workspace/CubeMaster && go build -o "${PREBUILT_DIR}/cubemastercli" ./cmd/cubemastercli)
+(cd /workspace/CubeMaster && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${PREBUILT_DIR}/cubemastercli" ./cmd/cubemastercli)
 
 echo "[one-click] building cubelet in builder" >&2
-(cd /workspace/Cubelet && go mod download && go build -o "${PREBUILT_DIR}/cubelet" ./cmd/cubelet)
+(cd /workspace/Cubelet && go mod download && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${PREBUILT_DIR}/cubelet" ./cmd/cubelet)
 
 echo "[one-click] building cubecli in builder" >&2
-(cd /workspace/Cubelet && go build -o "${PREBUILT_DIR}/cubecli" ./cmd/cubecli)
+(cd /workspace/Cubelet && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${PREBUILT_DIR}/cubecli" ./cmd/cubecli)
 
 echo "[one-click] building cube-api in builder" >&2
+case "$(uname -m)" in
+  x86_64) BUILDER_NATIVE_ARCH=amd64 ;;
+  aarch64|arm64) BUILDER_NATIVE_ARCH=arm64 ;;
+  *) echo "[one-click] unsupported builder host architecture: $(uname -m)" >&2; exit 1 ;;
+esac
+if [[ "${BUILDER_NATIVE_ARCH}" != "${TARGET_ARCH}" ]]; then
+  echo "[one-click] cube-api requires a native ${TARGET_ARCH} builder; builder is ${BUILDER_NATIVE_ARCH}" >&2
+  echo "[one-click] For cross-arch packaging with prebuilt Rust artifacts, call build-release-bundle.sh directly with ONE_CLICK_*_BIN overrides." >&2
+  exit 1
+fi
 (cd /workspace/CubeAPI && cargo build --release --locked)
 install -m 0755 /workspace/CubeAPI/target/release/cube-api "${PREBUILT_DIR}/cube-api"
 
 echo "[one-click] building network-agent in builder" >&2
-(cd /workspace/network-agent && go build -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
+(cd /workspace/network-agent && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${PREBUILT_DIR}/network-agent" ./cmd/network-agent)
 
 echo "[one-click] building cube-agent in builder" >&2
-(cd /workspace/agent && make -j1)
-install -m 0755 /workspace/agent/target/x86_64-unknown-linux-musl/release/cube-agent "${PREBUILT_DIR}/cube-agent"
+(cd /workspace/agent && HOST_ARCH="${TARGET_ARCH}" TRIPLE="${RUST_MUSL_TRIPLE}" make -j1)
+install -m 0755 "/workspace/agent/target/${RUST_MUSL_TRIPLE}/release/cube-agent" "${PREBUILT_DIR}/cube-agent"
 
 echo "[one-click] building shim workspace in builder" >&2
+if [[ "${BUILDER_NATIVE_ARCH}" != "${TARGET_ARCH}" ]]; then
+  echo "[one-click] CubeShim requires a native ${TARGET_ARCH} builder; builder is ${BUILDER_NATIVE_ARCH}" >&2
+  echo "[one-click] For cross-arch packaging with prebuilt Rust artifacts, call build-release-bundle.sh directly with ONE_CLICK_*_BIN overrides." >&2
+  exit 1
+fi
 (cd /workspace/CubeShim && cargo build --release --locked)
 install -m 0755 /workspace/CubeShim/target/release/containerd-shim-cube-rs "${PREBUILT_DIR}/containerd-shim-cube-rs"
 install -m 0755 /workspace/CubeShim/target/release/cube-runtime "${PREBUILT_DIR}/cube-runtime"
@@ -77,7 +98,7 @@ fi
 log "building one-click component binaries in builder"
 make -C "${ROOT_DIR}" builder-run \
   BUILDER_IMAGE="${BUILDER_IMAGE_REF}" \
-  BUILDER_CMD="bash /workspace/deploy/one-click/.work/build-prebuilt-in-builder.sh" >&2
+  BUILDER_CMD="ONE_CLICK_TARGET_ARCH=${TARGET_ARCH} ONE_CLICK_TARGET_PLATFORM=${TARGET_PLATFORM} ONE_CLICK_RUST_MUSL_TRIPLE=${RUST_MUSL_TRIPLE} bash /workspace/deploy/one-click/.work/build-prebuilt-in-builder.sh" >&2
 
 for artifact in \
   cubemaster \
@@ -94,6 +115,7 @@ do
 done
 
 log "packaging one-click release bundle on host with prebuilt artifacts"
+ONE_CLICK_TARGET_ARCH="${TARGET_ARCH}" \
 ONE_CLICK_CUBEMASTER_BIN="${PREBUILT_DIR}/cubemaster" \
 ONE_CLICK_CUBEMASTERCLI_BIN="${PREBUILT_DIR}/cubemastercli" \
 ONE_CLICK_CUBELET_BIN="${PREBUILT_DIR}/cubelet" \
