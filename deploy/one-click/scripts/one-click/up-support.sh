@@ -27,6 +27,51 @@ SUPPORT_DIR="${TOOLBOX_ROOT}/support"
 SUPPORT_TEMPLATE="${SUPPORT_DIR}/docker-compose.yaml.template"
 SUPPORT_COMPOSE_FILE="${SUPPORT_DIR}/docker-compose.yaml"
 
+normalize_one_click_arch() {
+  local raw="${1:-}"
+  case "${raw}" in
+    amd64|x86_64|linux/amd64|linux-amd64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64|linux/arm64|linux-arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported one-click target arch: ${raw:-<empty>} (expected amd64 or arm64)"
+      ;;
+  esac
+}
+
+detect_host_one_click_arch() {
+  normalize_one_click_arch "$(uname -m)"
+}
+
+support_target_arch() {
+  if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+    normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}"
+    return 0
+  fi
+
+  detect_host_one_click_arch
+}
+
+default_support_mysql_image() {
+  case "$(support_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0\n' ;;
+    arm64) printf 'mysql:8.0\n' ;;
+  esac
+}
+
+default_support_redis_image() {
+  case "$(support_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine\n' ;;
+    arm64) printf 'redis:7-alpine\n' ;;
+  esac
+}
+
+MYSQL_IMAGE="${CUBE_SANDBOX_MYSQL_IMAGE:-$(default_support_mysql_image)}"
+REDIS_IMAGE="${CUBE_SANDBOX_REDIS_IMAGE:-$(default_support_redis_image)}"
+
 ensure_dir "${SUPPORT_DIR}"
 ensure_dir "${SQL_DIR}"
 ensure_file "${SUPPORT_TEMPLATE}"
@@ -36,6 +81,8 @@ escape_sed() {
 }
 
 sed \
+  -e "s/__MYSQL_IMAGE__/$(escape_sed "${MYSQL_IMAGE}")/g" \
+  -e "s/__REDIS_IMAGE__/$(escape_sed "${REDIS_IMAGE}")/g" \
   -e "s/__MYSQL_CONTAINER__/$(escape_sed "${MYSQL_CONTAINER}")/g" \
   -e "s/__REDIS_CONTAINER__/$(escape_sed "${REDIS_CONTAINER}")/g" \
   -e "s/__MYSQL_VOLUME__/$(escape_sed "${MYSQL_VOLUME}")/g" \

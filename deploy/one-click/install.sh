@@ -28,6 +28,7 @@ case "${CUBE_PVM_ENABLE}" in
   0|1) ;;
   *) die "unsupported CUBE_PVM_ENABLE: ${CUBE_PVM_ENABLE} (expected 0 or 1)" ;;
 esac
+TARGET_ARCH=""
 
 print_path_hint() {
   {
@@ -402,6 +403,20 @@ log "extracting package ${PACKAGE_TAR}"
 tar -xzf "${PACKAGE_TAR}" -C "${WORK_DIR}"
 PKG_ROOT="${WORK_DIR}/sandbox-package"
 ensure_dir "${PKG_ROOT}"
+if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+  TARGET_ARCH="$(normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}")"
+else
+  shopt -s nullglob
+  kernel_arch_dirs=("${PKG_ROOT}"/cube-kernel-scf-linux-*)
+  shopt -u nullglob
+  if [[ "${#kernel_arch_dirs[@]}" -eq 1 ]]; then
+    TARGET_ARCH="${kernel_arch_dirs[0]##*-linux-}"
+    TARGET_ARCH="$(normalize_one_click_arch "${TARGET_ARCH}")"
+  else
+    TARGET_ARCH="$(detect_host_one_click_arch)"
+  fi
+fi
+log "using one-click target arch: ${TARGET_ARCH}"
 
 installed_role="${DEPLOY_ROLE}"
 detected_installed_role="$(detect_installed_role)"
@@ -426,7 +441,11 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/systemd" \
     "${INSTALL_PREFIX}/cube-shim" \
     "${INSTALL_PREFIX}/cube-kernel-scf" \
+    "${INSTALL_PREFIX}/cube-kernel-scf-linux-amd64" \
+    "${INSTALL_PREFIX}/cube-kernel-scf-linux-arm64" \
     "${INSTALL_PREFIX}/cube-image" \
+    "${INSTALL_PREFIX}/cube-image-linux-amd64" \
+    "${INSTALL_PREFIX}/cube-image-linux-arm64" \
     "${INSTALL_PREFIX}/scripts" \
     "${INSTALL_PREFIX}/sql" \
     "${INSTALL_PREFIX}/.one-click.env"
@@ -439,13 +458,29 @@ if [[ "${DEPLOY_ROLE}" == "compute" ]]; then
   copy_dir_contents "${PKG_ROOT}/network-agent" "${INSTALL_PREFIX}/network-agent"
   copy_dir_contents "${PKG_ROOT}/Cubelet" "${INSTALL_PREFIX}/Cubelet"
   copy_dir_contents "${PKG_ROOT}/cube-shim" "${INSTALL_PREFIX}/cube-shim"
-  copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
-  copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
+  if [[ -d "${PKG_ROOT}/cube-kernel-scf-linux-${TARGET_ARCH}" ]]; then
+    copy_dir_contents "${PKG_ROOT}/cube-kernel-scf-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-kernel-scf-linux-${TARGET_ARCH}"
+    ln -sfn "cube-kernel-scf-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-kernel-scf"
+  else
+    copy_dir_contents "${PKG_ROOT}/cube-kernel-scf" "${INSTALL_PREFIX}/cube-kernel-scf"
+  fi
+  if [[ -d "${PKG_ROOT}/cube-image-linux-${TARGET_ARCH}" ]]; then
+    copy_dir_contents "${PKG_ROOT}/cube-image-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-image-linux-${TARGET_ARCH}"
+    ln -sfn "cube-image-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-image"
+  else
+    copy_dir_contents "${PKG_ROOT}/cube-image" "${INSTALL_PREFIX}/cube-image"
+  fi
   copy_dir_contents "${PKG_ROOT}/systemd" "${INSTALL_PREFIX}/systemd"
   copy_dir_contents "${PKG_ROOT}/scripts" "${INSTALL_PREFIX}/scripts"
 else
   generate_cubemaster_config_ports
   cp -a "${PKG_ROOT}/." "${INSTALL_PREFIX}/"
+  if [[ -d "${INSTALL_PREFIX}/cube-kernel-scf-linux-${TARGET_ARCH}" ]]; then
+    ln -sfn "cube-kernel-scf-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-kernel-scf"
+  fi
+  if [[ -d "${INSTALL_PREFIX}/cube-image-linux-${TARGET_ARCH}" ]]; then
+    ln -sfn "cube-image-linux-${TARGET_ARCH}" "${INSTALL_PREFIX}/cube-image"
+  fi
 fi
 
 select_installed_kernel_vmlinux
@@ -473,6 +508,7 @@ else
   : > "${RUNTIME_ENV_FILE}"
 fi
 upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_DEPLOY_ROLE" "${DEPLOY_ROLE}"
+upsert_env_kv "${RUNTIME_ENV_FILE}" "ONE_CLICK_TARGET_ARCH" "${TARGET_ARCH}"
 upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_PVM_ENABLE" "${CUBE_PVM_ENABLE}"
 if [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]]; then
   upsert_env_kv "${RUNTIME_ENV_FILE}" "CUBE_SANDBOX_NODE_IP" "${CUBE_SANDBOX_NODE_IP}"

@@ -1,4 +1,5 @@
-FROM cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+ARG CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
+FROM ${CUBE_PROXY_BASE_IMAGE}
 
 LABEL maintainer="staryxchen <staryxchen@tencent.com>"
 

@@ -19,6 +19,7 @@ CORE_BIN_DIR="${WORK_ROOT}/core-bin"
 PACKAGE_ROOT="${WORK_ROOT}/sandbox-package"
 PACKAGE_TAR="${WORK_ROOT}/sandbox-package.tar.gz"
 RAW_ARTIFACTS_DIR="${SCRIPT_DIR}/assets/kernel-artifacts"
+TARGET_ARCH="$(one_click_target_arch)"
 CUBE_PROXY_TEMPLATE_DIR="${SCRIPT_DIR}/cubeproxy"
 CUBE_COREDNS_TEMPLATE_DIR="${SCRIPT_DIR}/coredns"
 CUBE_SUPPORT_TEMPLATE_DIR="${SCRIPT_DIR}/support"
@@ -28,7 +29,7 @@ CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
 MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
-CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-${RAW_ARTIFACTS_DIR}/vmlinux}"
+CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-$(one_click_default_kernel_vmlinux "${RAW_ARTIFACTS_DIR}" "${TARGET_ARCH}")}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-$(latest_git_revision "${ROOT_DIR}")}"
 DIST_ROOT="${SCRIPT_DIR}/dist/cube-sandbox-one-click-${DIST_VERSION}"
@@ -54,7 +55,7 @@ build_go_binary() {
   case "${mode}" in
     local)
       require_cmd go
-      (cd "${workdir}" && go mod download && go build -o "${output}" "$@") >&2
+      (cd "${workdir}" && go mod download && GOOS=linux GOARCH="${TARGET_ARCH}" go build -o "${output}" "$@") >&2
       ;;
     *)
       die "unsupported build mode: ${mode}"
@@ -69,6 +70,7 @@ build_rust_binary() {
   local output="$4"
   case "${mode}" in
     local)
+      ensure_native_one_click_build_arch "${TARGET_ARCH}" "${binary_name}"
       require_cmd cargo
       (cd "${workdir}" && cargo build --release --locked --bin "${binary_name}") >&2
       copy_file "${workdir}/target/release/${binary_name}" "${output}"
@@ -223,26 +225,32 @@ build_or_copy_go_binary \
   "cubemaster" "${CUBEMASTER_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubemaster" ./cmd/cubemaster
+validate_one_click_file_arch "${CORE_BIN_DIR}/cubemaster" "${TARGET_ARCH}" "cubemaster"
 build_or_copy_go_binary \
   "cubemastercli" "${CUBEMASTERCLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeMaster" "${CUBEMASTER_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubemastercli" ./cmd/cubemastercli
+validate_one_click_file_arch "${CORE_BIN_DIR}/cubemastercli" "${TARGET_ARCH}" "cubemastercli"
 build_or_copy_go_binary \
   "cubelet" "${CUBELET_BIN_OVERRIDE}" \
   "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubelet" ./cmd/cubelet
+validate_one_click_file_arch "${CORE_BIN_DIR}/cubelet" "${TARGET_ARCH}" "cubelet"
 build_or_copy_go_binary \
   "cubecli" "${CUBECLI_BIN_OVERRIDE}" \
   "${ROOT_DIR}/Cubelet" "${CUBELET_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cubecli" ./cmd/cubecli
+validate_one_click_file_arch "${CORE_BIN_DIR}/cubecli" "${TARGET_ARCH}" "cubecli"
 build_or_copy_rust_binary \
   "cube-api" "${API_BIN_OVERRIDE}" \
   "${ROOT_DIR}/CubeAPI" "${API_BUILD_MODE}" \
   "${CORE_BIN_DIR}/cube-api"
+validate_one_click_file_arch "${CORE_BIN_DIR}/cube-api" "${TARGET_ARCH}" "cube-api"
 build_or_copy_go_binary \
   "network-agent" "${NETWORK_AGENT_BIN_OVERRIDE}" \
   "${ROOT_DIR}/network-agent" "${NETWORK_AGENT_BUILD_MODE}" \
   "${CORE_BIN_DIR}/network-agent" ./cmd/network-agent
+validate_one_click_file_arch "${CORE_BIN_DIR}/network-agent" "${TARGET_ARCH}" "network-agent"
 
 mkdir -p \
   "${PACKAGE_ROOT}/network-agent/bin" \
@@ -301,8 +309,10 @@ copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
 
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
-copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf" "${PACKAGE_ROOT}/cube-kernel-scf"
-copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image" "${PACKAGE_ROOT}/cube-image"
+copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-kernel-scf-linux-${TARGET_ARCH}"
+copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-image-linux-${TARGET_ARCH}"
+ln -sfn "cube-kernel-scf-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-kernel-scf"
+ln -sfn "cube-image-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-image"
 
 copy_file "${SCRIPT_DIR}/scripts/one-click/common.sh" "${PACKAGE_ROOT}/scripts/one-click/common.sh"
 copy_file "${SCRIPT_DIR}/scripts/one-click/quickcheck.sh" "${PACKAGE_ROOT}/scripts/one-click/quickcheck.sh"

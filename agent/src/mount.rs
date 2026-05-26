@@ -4,7 +4,7 @@
 //
 
 use crate::device::{
-    get_device_name_by_pci, get_scsi_device_name, get_virtio_blk_pci_device_name, online_device,
+    get_device_name_by_pci, get_scsi_device_name, get_virtio_blk_pci_device_name,
     wait_for_pmem_device, DRIVER_BIND_SHARE_TYPE, DRIVER_BLK_CUBE_TYPE, DRIVER_BLK_TYPE,
     DRIVER_CUBE_BIND_TYPE, DRIVER_EPHEMERAL_TYPE, DRIVER_LOCAL_TYPE, DRIVER_MMIO_BLK_TYPE,
     DRIVER_NVDIMM_TYPE, DRIVER_OVERLAYFS_TYPE, DRIVER_SCSI_TYPE, DRIVER_VIRTIOFS_TYPE,
@@ -24,6 +24,7 @@ use slog::Logger;
 use std::collections::HashMap;
 use std::fs;
 use std::fs::{File, OpenOptions};
+use std::io::ErrorKind;
 use std::io::{BufRead, BufReader, Write};
 use std::iter;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -1163,7 +1164,21 @@ pub fn cgroups_mount(logger: &Logger, unified_cgroup_hierarchy: bool) -> Result<
     if !unified_cgroup_hierarchy {
         // Enable memory hierarchical account.
         // For more information see https://www.kernel.org/doc/Documentation/cgroup-v1/memory.txt
-        online_device("/sys/fs/cgroup/memory/memory.use_hierarchy")?;
+        let memory_hierarchy = "/sys/fs/cgroup/memory/memory.use_hierarchy";
+        match fs::write(memory_hierarchy, "1") {
+            Ok(_) => {}
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                warn!(
+                    logger,
+                    "skip memory hierarchy enable because {} is missing", memory_hierarchy
+                );
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("failed to enable memory hierarchy at {}", memory_hierarchy)
+                })
+            }
+        }
     }
     Ok(())
 }

@@ -48,14 +48,28 @@ endif
 ##VAR BUILD_TYPE=release|debug type of rust build
 BUILD_TYPE = release
 
-##VAR MUSL=yes|no build a fully static x86_64-unknown-linux-musl binary
+##VAR MUSL=yes|no build a fully static musl binary for the host architecture
 MUSL := yes
 
 EXTRA_RUSTFLAGS :=
 CARGO_TARGET_FLAG :=
+HOST_ARCH ?= $(shell uname -m)
+
+ifeq ($(HOST_ARCH),x86_64)
+    DEFAULT_MUSL_TRIPLE := x86_64-unknown-linux-musl
+else ifeq ($(HOST_ARCH),aarch64)
+    DEFAULT_MUSL_TRIPLE := aarch64-unknown-linux-musl
+else ifeq ($(HOST_ARCH),arm64)
+    DEFAULT_MUSL_TRIPLE := aarch64-unknown-linux-musl
+else
+    DEFAULT_MUSL_TRIPLE :=
+endif
 
 ifeq ($(MUSL),yes)
-    TRIPLE = x86_64-unknown-linux-musl
+    TRIPLE ?= $(DEFAULT_MUSL_TRIPLE)
+    ifeq ($(TRIPLE),)
+        $(error unsupported host architecture "$(HOST_ARCH)" for MUSL=yes; set TRIPLE=<rust-target> or MUSL=no)
+    endif
     CARGO_TARGET_FLAG := --target $(TRIPLE)
     # +crt-static: statically link libc/crt
     # -lpthread: required by libunwind in musl builds (pthread_rwlock_*)

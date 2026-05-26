@@ -3,6 +3,8 @@
 
 BUILDER_IMAGE ?= cube-sandbox-builder:latest
 BUILDER_DOCKERFILE ?= docker/Dockerfile.builder
+BUILDER_DOCKER_BUILD_ARGS ?=
+BUILDER_DOCKER_RUN_ARGS ?=
 BUILDER_HOME ?= $(HOME)/.cache/cube-sandbox-builder
 BUILDER_CONTAINER_HOME ?= /home/builder
 TMP_GIT_CREDENTIALS ?= /tmp/.cube-sandbox-builder-tmp-git-credentials
@@ -53,7 +55,7 @@ builder-image:
 	@if [ -z "$(BUILDER_FORCE_REBUILD)" ] && docker image inspect $(BUILDER_IMAGE) >/dev/null 2>&1; then \
 		printf 'Builder image %s already present, skipping build (set BUILDER_FORCE_REBUILD=1 to rebuild)\n' "$(BUILDER_IMAGE)"; \
 	else \
-		docker build -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
+		docker build $(BUILDER_DOCKER_BUILD_ARGS) -t $(BUILDER_IMAGE) -f $(BUILDER_DOCKERFILE) ./docker; \
 	fi
 
 prepare-builder-home:
@@ -72,6 +74,7 @@ prepare-tmp-git-credentials:
 
 builder-shell: prepare-builder-home prepare-tmp-git-credentials
 	docker run --rm -it \
+		$(BUILDER_DOCKER_RUN_ARGS) \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \
@@ -87,6 +90,7 @@ builder-shell: prepare-builder-home prepare-tmp-git-credentials
 builder-run: prepare-builder-home prepare-tmp-git-credentials
 	@test -n "$(strip $(BUILDER_CMD))" || { echo "BUILDER_CMD must not be empty"; exit 1; }
 	docker run --rm -i \
+		$(BUILDER_DOCKER_RUN_ARGS) \
 		--user "$(UID):$(GID)" \
 		-e HOME=$(BUILDER_CONTAINER_HOME) \
 		-e CARGO_HOME=$(BUILDER_CONTAINER_HOME)/.cargo \

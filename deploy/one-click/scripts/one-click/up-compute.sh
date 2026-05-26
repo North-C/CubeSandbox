@@ -52,7 +52,10 @@ mkdir -p \
 
 start_with_pidfile \
   "network-agent" \
-  "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\""
+  "mkdir -p /tmp/cube \"${NETWORK_AGENT_STATE_DIR}\" && \"${NETWORK_AGENT_BIN}\" --cubelet-config \"${CUBELET_CONFIG}\" --state-dir \"${NETWORK_AGENT_STATE_DIR}\" --health-listen \"${NETWORK_AGENT_HEALTH_ADDR}\""
+
+wait_for_network_agent_ready "${NETWORK_AGENT_HEALTH_ADDR}" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || \
+  die "network-agent did not become ready, check logs under ${LOG_DIR}"
 
 wait_for_http "http://${NETWORK_AGENT_HEALTH_ADDR}/readyz" "${NETWORK_AGENT_READY_TIMEOUT}" 1 || die "network-agent did not become ready, check logs under ${LOG_DIR}"
 

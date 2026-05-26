@@ -230,6 +230,15 @@ wait_for_http() {
   return 1
 }
 
+wait_for_network_agent_ready() {
+  local addr="$1"
+  local retries="${2:-30}"
+  local delay="${3:-1}"
+
+  wait_for_http "http://${addr}/healthz" "${retries}" "${delay}" || return 1
+  wait_for_http "http://${addr}/readyz" "${retries}" "${delay}" || return 1
+}
+
 wait_for_health() {
   local container="$1"
   local retries="${2:-40}"

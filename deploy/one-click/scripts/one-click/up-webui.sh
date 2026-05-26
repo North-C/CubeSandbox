@@ -21,10 +21,46 @@ if [[ "${WEB_UI_ENABLE}" != "1" ]]; then
   exit 0
 fi
 
-WEB_UI_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
 WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"
+
+normalize_one_click_arch() {
+  local raw="${1:-}"
+  case "${raw}" in
+    amd64|x86_64|linux/amd64|linux-amd64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64|linux/arm64|linux-arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported one-click target arch: ${raw:-<empty>} (expected amd64 or arm64)"
+      ;;
+  esac
+}
+
+detect_host_one_click_arch() {
+  normalize_one_click_arch "$(uname -m)"
+}
+
+webui_target_arch() {
+  if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+    normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}"
+    return 0
+  fi
+
+  detect_host_one_click_arch
+}
+
+default_webui_image() {
+  case "$(webui_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat\n' ;;
+    arm64) printf 'openresty/openresty:1.21.4.1-6-alpine-fat\n' ;;
+  esac
+}
+
+WEB_UI_IMAGE="${WEB_UI_IMAGE:-$(default_webui_image)}"
 
 WEB_UI_DIST_DIR="${WEBUI_DIR}/dist"
 NGINX_TEMPLATE="${WEBUI_DIR}/nginx.conf"
