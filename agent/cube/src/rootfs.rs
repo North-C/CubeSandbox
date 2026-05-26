@@ -74,54 +74,60 @@ pub struct PropagationContainerUmount {
     pub container_dir: String,
 }
 
-pub fn exit_proc_failed(msg: String) {
+pub fn exit_proc_failed(msg: String) -> ! {
     println!("{}", msg);
     std::process::exit(1);
 }
 
+fn parse_exec_mounts(value: Option<&str>) -> Result<Vec<ExecMount>, String> {
+    match value {
+        Some(val) => serde_json::from_str::<Vec<ExecMount>>(val)
+            .map_err(|e| format!("Deserialize ExecMount failed:{}", e)),
+        None => Ok(vec![]),
+    }
+}
+
+fn parse_propagation_container_umounts(
+    value: Option<&str>,
+) -> Result<Vec<PropagationContainerUmount>, String> {
+    match value {
+        Some(val) => serde_json::from_str::<Vec<PropagationContainerUmount>>(val)
+            .map_err(|e| format!("Deserialize PropagationContainerUmount failed:{}", e)),
+        None => Ok(vec![]),
+    }
+}
+
+pub fn has_exec_mount_work(
+    exec_mnts: Option<&String>,
+    propa_umnts: Option<&String>,
+) -> Result<bool, String> {
+    let exec_mnts = parse_exec_mounts(exec_mnts.map(String::as_str))?;
+    let propa_umnts = parse_propagation_container_umounts(propa_umnts.map(String::as_str))?;
+
+    Ok(!exec_mnts.is_empty() || !propa_umnts.is_empty())
+}
+
 pub fn do_exec_mount() {
     println!("exec process start");
+    let exec_mnts = parse_exec_mounts(std::env::var(ANNO_PROPAGATION_EXEC_MNTS).ok().as_deref())
+        .unwrap_or_else(|e| exit_proc_failed(e));
+    let propa_umnts = parse_propagation_container_umounts(
+        std::env::var(ANNO_PROPAGATION_CONTAINER_UMNTS)
+            .ok()
+            .as_deref(),
+    )
+    .unwrap_or_else(|e| exit_proc_failed(e));
+
+    if exec_mnts.is_empty() && propa_umnts.is_empty() {
+        println!("no exec mounts or propagation umounts, skip setns");
+        return;
+    }
+
     let ev_pid = std::env::var(ENV_CONTAINER_PID);
     if ev_pid.is_err() {
         exit_proc_failed(format!("Not found env: {}", ENV_CONTAINER_PID));
     }
     let pid: pid_t = ev_pid.unwrap().parse().expect("invalid pid");
-
-    let exec_mnts = {
-        match std::env::var(ANNO_PROPAGATION_EXEC_MNTS) {
-            Ok(val) => {
-                let exec_mnts = serde_json::from_str::<Vec<ExecMount>>(val.as_str());
-                if let Err(e) = exec_mnts.as_ref() {
-                    exit_proc_failed(format!("Deserialize ExecMount failed:{}", e.to_string()));
-                }
-                exec_mnts.unwrap()
-            }
-            Err(_) => {
-                let exec_mnts = vec![];
-                exec_mnts
-            }
-        }
-    };
-
-    let propa_umnts = {
-        match std::env::var(ANNO_PROPAGATION_CONTAINER_UMNTS) {
-            Ok(val) => {
-                let propa_umnts =
-                    serde_json::from_str::<Vec<PropagationContainerUmount>>(val.as_str());
-                if let Err(e) = propa_umnts.as_ref() {
-                    exit_proc_failed(format!(
-                        "Deserialize PropagationContainerUmount failed:{}",
-                        e.to_string()
-                    ));
-                }
-                propa_umnts.unwrap()
-            }
-            Err(_) => {
-                let propa_umnts = vec![];
-                propa_umnts
-            }
-        }
-    };
 
     let mnt_ns_path = format!("/proc/{}/ns/mnt", pid);
     let file = File::open(mnt_ns_path.clone());
@@ -212,8 +218,7 @@ pub fn do_exec_mount() {
 #[cfg(test)]
 mod tests {
     use crate::rootfs::RootfsInfo;
-    use crate::rootfs::K_VIRTIOFS_BASE_DIR;
-    use std::env;
+
     #[test]
     fn test_rootfsinfo_new() {
         let info =

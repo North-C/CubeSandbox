@@ -90,6 +90,8 @@ use nix::unistd::{Gid, Uid};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::FileExt;
+#[cfg(target_arch = "aarch64")]
+use std::os::unix::io::AsRawFd;
 use std::path::PathBuf;
 use std::str::FromStr;
 const CONTAINER_BASE: &str = "/run/cube-containers";
@@ -174,6 +176,18 @@ impl AgentService {
         let anno = oci.annotations.clone();
         if let Some(id) = anno.get(ANNO_APP_SNAPSHOT_CONTAINER_ID) {
             info!(sl!(), "create container by restore");
+            let exec_mnts = anno.get(ANNO_PROPAGATION_EXEC_MNTS);
+            let propa_umnts = anno.get(ANNO_PROPAGATION_CONTAINER_UMNTS);
+            if !rootfs::has_exec_mount_work(exec_mnts, propa_umnts)
+                .map_err(|e| anyhow!("invalid propagation mount annotations:{}", e))?
+            {
+                info!(
+                    sl!(),
+                    "skip exec mount for restored container without propagation mounts"
+                );
+                return Ok(());
+            }
+
             let pid = {
                 let sandbox = self.sandbox.clone();
                 let mut s: tokio::sync::MutexGuard<'_, Sandbox> = sandbox.lock().await;
@@ -182,13 +196,9 @@ impl AgentService {
             };
 
             debug!(sl!(), "container pid:{}", pid);
-            start_exec_process(
-                pid,
-                anno.get(ANNO_PROPAGATION_EXEC_MNTS),
-                anno.get(ANNO_PROPAGATION_CONTAINER_UMNTS),
-            )
-            .await
-            .map_err(|e| anyhow!(format!("Exec mount failed:{}", e.to_string())))?;
+            start_exec_process(pid, exec_mnts, propa_umnts)
+                .await
+                .map_err(|e| anyhow!(format!("Exec mount failed:{}", e.to_string())))?;
             return Ok(());
         }
 
@@ -1823,6 +1833,13 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         moniclock::Clock::new().elapsed().as_millis()
     );
 
+    notify_hypervisor_agent_started();
+
+    Ok(server)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn notify_hypervisor_agent_started() {
     let port: u16 = 0x680;
     let data: u8 = 0x8;
     unsafe {
@@ -1833,8 +1850,74 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
     unsafe {
         ioport.write(data);
     }
+}
 
-    Ok(server)
+#[cfg(target_arch = "aarch64")]
+fn notify_hypervisor_agent_started() {
+    const SYS_CTRL_MMIO_BASE: libc::off_t = 0x0903_0000;
+    const SYS_VSOCK_SERVER: u8 = 1 << 3;
+    const MMIO_LEN: usize = 0x1000;
+
+    if !Path::new("/dev/mem").exists() {
+        let mode = stat::Mode::from_bits_truncate(0o600);
+        let dev = stat::makedev(1, 1);
+        if let Err(e) = stat::mknod("/dev/mem", stat::SFlag::S_IFCHR, mode, dev) {
+            error!(
+                sl!(),
+                "failed to create /dev/mem for startup notification: {}", e
+            );
+            return;
+        }
+    }
+
+    let mem = match OpenOptions::new().read(true).write(true).open("/dev/mem") {
+        Ok(mem) => mem,
+        Err(e) => {
+            error!(
+                sl!(),
+                "failed to open /dev/mem for startup notification: {}", e
+            );
+            return;
+        }
+    };
+
+    let map = unsafe {
+        libc::mmap(
+            std::ptr::null_mut(),
+            MMIO_LEN,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_SHARED,
+            mem.as_raw_fd(),
+            SYS_CTRL_MMIO_BASE,
+        )
+    };
+    if map == libc::MAP_FAILED {
+        let e = std::io::Error::last_os_error();
+        error!(
+            sl!(),
+            "failed to map sys_ctrl MMIO for startup notification: {}", e
+        );
+        return;
+    }
+
+    unsafe {
+        std::ptr::write_volatile(map as *mut u8, SYS_VSOCK_SERVER);
+        if libc::munmap(map, MMIO_LEN) != 0 {
+            let e = std::io::Error::last_os_error();
+            warn!(
+                sl!(),
+                "failed to unmap sys_ctrl MMIO after startup notification: {}", e
+            );
+        }
+    }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+fn notify_hypervisor_agent_started() {
+    debug!(
+        sl!(),
+        "startup notification is not supported on this architecture"
+    );
 }
 
 // This function updates the container namespaces configuration based on the

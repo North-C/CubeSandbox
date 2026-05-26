@@ -316,7 +316,16 @@ fn set_cpu_resources(cg: &cgroups::Cgroup, cpu: &LinuxCpu) -> Result<()> {
         cpuset_controller.set_mems(&cpu.mems)?;
     }*/
 
-    let cpu_controller: &CpuController = cg.controller_of().unwrap();
+    let cpu_controller: &CpuController = match cg.controller_of() {
+        Some(controller) => controller,
+        None => {
+            warn!(
+                sl!(),
+                "skip cpu resource settings because cpu cgroup controller is unavailable"
+            );
+            return Ok(());
+        }
+    };
 
     if let Some(shares) = cpu.shares {
         let shares = if cg.v2() {
@@ -339,7 +348,16 @@ fn set_cpu_resources(cg: &cgroups::Cgroup, cpu: &LinuxCpu) -> Result<()> {
 }
 
 fn set_memory_resources(cg: &cgroups::Cgroup, memory: &LinuxMemory, update: bool) -> Result<()> {
-    let mem_controller: &MemController = cg.controller_of().unwrap();
+    let mem_controller: &MemController = match cg.controller_of() {
+        Some(controller) => controller,
+        None => {
+            warn!(
+                sl!(),
+                "skip memory resource settings because memory cgroup controller is unavailable"
+            );
+            return Ok(());
+        }
+    };
 
     if !update {
         // initialize kmem limits for accounting
@@ -407,7 +425,16 @@ fn set_memory_resources(cg: &cgroups::Cgroup, memory: &LinuxMemory, update: bool
 }
 
 fn set_pids_resources(cg: &cgroups::Cgroup, pids: &LinuxPids) -> Result<()> {
-    let pid_controller: &PidController = cg.controller_of().unwrap();
+    let pid_controller: &PidController = match cg.controller_of() {
+        Some(controller) => controller,
+        None => {
+            warn!(
+                sl!(),
+                "skip pids resource settings because pids cgroup controller is unavailable"
+            );
+            return Ok(());
+        }
+    };
     let v = if pids.limit > 0 {
         MaxValue::Value(pids.limit)
     } else {
