@@ -770,43 +770,6 @@ impl SandBox {
             self.boot_vm().await?;
         }
 
-        #[cfg(target_arch = "aarch64")]
-        {
-            let start = Instant::now();
-            let timeout = Duration::from_secs(10);
-            let mut last_err = String::new();
-            let mut ready = false;
-
-            while start.elapsed() < timeout {
-                match AsyncUtils::connect_agent(&self.id).await {
-                    Ok(conn) => {
-                        drop(conn);
-                        let duration = start.elapsed().as_millis();
-                        infof!(
-                            self.log,
-                            "vm ready, agent vsock is connectable, cost:{}",
-                            duration
-                        );
-                        ready = true;
-                        break;
-                    }
-                    Err(e) => {
-                        last_err = e.to_string();
-                        sleep(Duration::from_millis(100)).await;
-                    }
-                }
-            }
-
-            if !ready {
-                return Err(format!(
-                    "Receive agent vsock ready timeout after {}ms, last error:{}",
-                    timeout.as_millis(),
-                    last_err
-                ));
-            }
-        }
-
-        #[cfg(not(target_arch = "aarch64"))]
         {
             let ch = self.ch.as_mut().unwrap().lock().await;
             let start = Instant::now();
