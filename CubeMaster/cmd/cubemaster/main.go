@@ -10,7 +10,7 @@ import (
 	"runtime/debug"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemaster/app"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/integration"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/cmd/cubemaster/mockdebug"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/recov"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/version"
@@ -34,8 +34,9 @@ func main() {
 		return
 	}
 
-	if cfg.Common.MockDebug {
-		integration.MockInit()
+	if err := mockdebug.Init(cfg.Common.MockDebug); err != nil {
+		stdlog.Fatalf("mock debug init fail:%v", recov.DumpStacktrace(3, err))
+		return
 	}
 	app.Run()
 }

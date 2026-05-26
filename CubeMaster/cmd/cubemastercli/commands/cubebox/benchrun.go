@@ -22,7 +22,6 @@ import (
 
 	"github.com/google/uuid"
 	jsoniter "github.com/json-iterator/go"
-	"github.com/tencentcloud/CubeSandbox/CubeMaster/integration"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/semaphore"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/utils"
@@ -174,7 +173,7 @@ type wrapWg struct {
 
 	reqEveryConcurrent int64
 
-	lb *integration.LoadBalancer
+	lb *loadBalancer
 }
 
 func newAsyncRetryQueue(ctx context.Context) *asyncRetryQueue {
@@ -299,8 +298,8 @@ func initWragWaitGroup(tmpWg *wrapWg) {
 	}
 
 	if tmpWg.cliContext.Bool("testmocksch") {
-		reqFormatList := integration.GetAllFormatList()
-		tmpWg.lb = integration.NewLoadBalancer(reqFormatList[tmpWg.cliContext.String("biztype")])
+		reqFormatList := getAllFormatList()
+		tmpWg.lb = newLoadBalancer(reqFormatList[tmpWg.cliContext.String("biztype")])
 	}
 }
 func multiRunAction(c *cli.Context) error {
