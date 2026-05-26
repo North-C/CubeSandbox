@@ -15,9 +15,13 @@ ARG RUST_TOOLCHAIN_AGENT=1.89
 ARG GITHUB_ACTIONS=false
 ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
 ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+ARG GOPROXY=https://goproxy.cn,direct
+ARG GOSUMDB=sum.golang.google.cn
 
 ENV LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
+    GOPROXY="${GOPROXY}" \
+    GOSUMDB="${GOSUMDB}" \
     GOPATH=/go \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
@@ -37,8 +41,16 @@ RUN if [ "${GITHUB_ACTIONS}" != "true" ]; then \
             /etc/apt/sources.list; \
     fi
 
-RUN apt-get update -o Acquire::Retries=3 \
-    && apt install -y ca-certificates \
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    extra_packages=""; \
+    case "${arch}" in \
+        amd64) extra_packages="gcc-multilib" ;; \
+        arm64) extra_packages="" ;; \
+        *) echo "unsupported builder architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    apt-get update -o Acquire::Retries=3 \
+    && apt-get install -y ca-certificates \
     && apt-get install -y --no-install-recommends \
         bash \
         bc \
@@ -55,7 +67,7 @@ RUN apt-get update -o Acquire::Retries=3 \
         flex \
         bison \
         gperf \
-        gcc-multilib \
+        ${extra_packages} \
         git \
         git-lfs \
         jq \
@@ -94,12 +106,46 @@ RUN apt-get update -o Acquire::Retries=3 \
 RUN if [ -x /usr/bin/llvm-strip-14 ] && [ ! -e /usr/local/bin/llvm-strip ]; then ln -s /usr/bin/llvm-strip-14 /usr/local/bin/llvm-strip; fi \
     && if [ ! -e /usr/bin/musl-g++ ]; then ln -s /usr/bin/g++ /usr/bin/musl-g++; fi
 
-RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tgz \
+ARG GO_DOWNLOAD_BASE_URL=https://mirrors.aliyun.com/golang
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) go_arch=amd64 ;; \
+        arm64) go_arch=arm64 ;; \
+        *) echo "unsupported builder architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    for attempt in 1 2 3; do \
+        if curl --retry 5 --retry-delay 2 --connect-timeout 20 -fsSL "${GO_DOWNLOAD_BASE_URL}/go${GO_VERSION}.linux-${go_arch}.tar.gz" -o /tmp/go.tgz; then \
+            break; \
+        fi; \
+        rm -f /tmp/go.tgz; \
+        if [ "${attempt}" = "3" ]; then \
+            exit 1; \
+        fi; \
+        sleep "$((attempt * 5))"; \
+    done \
     && rm -rf /usr/local/go \
     && tar -C /usr/local -xzf /tmp/go.tgz \
     && rm -f /tmp/go.tgz
 
-RUN wget -q "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-x86_64.zip" -O /tmp/protoc.zip \
+ARG PROTOC_DOWNLOAD_BASE_URL=https://github.com/protocolbuffers/protobuf/releases/download
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "${arch}" in \
+        amd64) protoc_arch=x86_64 ;; \
+        arm64) protoc_arch=aarch_64 ;; \
+        *) echo "unsupported builder architecture: ${arch}" >&2; exit 1 ;; \
+    esac; \
+    for attempt in 1 2 3; do \
+        if curl --retry 5 --retry-delay 2 --connect-timeout 20 -fL "${PROTOC_DOWNLOAD_BASE_URL}/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${protoc_arch}.zip" -o /tmp/protoc.zip; then \
+            break; \
+        fi; \
+        rm -f /tmp/protoc.zip; \
+        if [ "${attempt}" = "3" ]; then \
+            exit 1; \
+        fi; \
+        sleep "$((attempt * 5))"; \
+    done \
     && unzip -q /tmp/protoc.zip -d /tmp/protoc \
     && install -m 0755 /tmp/protoc/bin/protoc /usr/local/bin/protoc \
     && cp -r /tmp/protoc/include/* /usr/local/include/ \
@@ -120,6 +166,7 @@ RUN set -eux; \
         rustup toolchain install "${toolchain}" --profile minimal; \
         rustup component add rust-src clippy rustfmt rust-analyzer llvm-tools-preview --toolchain "${toolchain}"; \
         rustup target add x86_64-unknown-linux-musl --toolchain "${toolchain}"; \
+        rustup target add aarch64-unknown-linux-musl --toolchain "${toolchain}"; \
     done; \
     rustup default "${RUST_TOOLCHAIN_DEFAULT}"
 
@@ -128,11 +175,27 @@ RUN mkdir -p "${CARGO_HOME}" /root/.cargo \
     && ln -sf "${CARGO_HOME}/config.toml" /root/.cargo/config.toml \
     && ln -sf "${CARGO_HOME}/env" /root/.cargo/env
 
+ARG LIBSECCOMP_DOWNLOAD_BASE_URL=https://github.com/seccomp/libseccomp/releases/download
 RUN tmp_dir="$(mktemp -d)" \
-    && wget -q "https://github.com/seccomp/libseccomp/releases/download/v${LIBSECCOMP_VERSION}/libseccomp-${LIBSECCOMP_VERSION}.tar.gz" -O "${tmp_dir}/libseccomp.tgz" \
+    && arch="$(dpkg --print-architecture)" \
+    && case "${arch}" in \
+        amd64) musl_host=x86_64-linux-musl; musl_include=/usr/include/x86_64-linux-musl; gnu_include=/usr/include/x86_64-linux-gnu ;; \
+        arm64) musl_host=aarch64-linux-musl; musl_include=/usr/include/aarch64-linux-musl; gnu_include=/usr/include/aarch64-linux-gnu ;; \
+        *) echo "unsupported builder architecture: ${arch}" >&2; exit 1 ;; \
+    esac \
+    && for attempt in 1 2 3; do \
+        if wget -q "${LIBSECCOMP_DOWNLOAD_BASE_URL}/v${LIBSECCOMP_VERSION}/libseccomp-${LIBSECCOMP_VERSION}.tar.gz" -O "${tmp_dir}/libseccomp.tgz"; then \
+            break; \
+        fi; \
+        rm -f "${tmp_dir}/libseccomp.tgz"; \
+        if [ "${attempt}" = "3" ]; then \
+            exit 1; \
+        fi; \
+        sleep "$((attempt * 5))"; \
+    done \
     && tar -xzf "${tmp_dir}/libseccomp.tgz" -C "${tmp_dir}" --strip-components=1 \
     && cd "${tmp_dir}" \
-    && CC=musl-gcc ./configure --host=x86_64-linux-musl CPPFLAGS="-I/usr/include/x86_64-linux-musl -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu" CFLAGS="-O2 -I/usr/include/x86_64-linux-musl -idirafter /usr/include -idirafter /usr/include/x86_64-linux-gnu" --disable-shared --enable-static --prefix=/usr/local/lib64/libseccomp \
+    && CC=musl-gcc ./configure --host="${musl_host}" CPPFLAGS="-I${musl_include} -idirafter /usr/include -idirafter ${gnu_include}" CFLAGS="-O2 -I${musl_include} -idirafter /usr/include -idirafter ${gnu_include}" --disable-shared --enable-static --prefix=/usr/local/lib64/libseccomp \
     && make -j"$(nproc)" \
     && make install \
     && rm -rf "${tmp_dir}"
