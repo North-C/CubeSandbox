@@ -1833,27 +1833,33 @@ pub fn start(s: Arc<Mutex<Sandbox>>, server_address: &str) -> Result<TtrpcServer
         moniclock::Clock::new().elapsed().as_millis()
     );
 
-    notify_hypervisor_agent_started();
+    notify_hypervisor_agent_started()?;
 
     Ok(server)
 }
 
 #[cfg(target_arch = "x86_64")]
-fn notify_hypervisor_agent_started() {
+fn notify_hypervisor_agent_started() -> Result<()> {
     let port: u16 = 0x680;
     let data: u8 = 0x8;
-    unsafe {
-        libc::ioperm(port as u64, 5, 1);
+    let ret = unsafe { libc::ioperm(port as u64, 5, 1) };
+    if ret != 0 {
+        return Err(anyhow!(
+            "ioperm for vsock server ready notify port 0x{:x} failed: {}",
+            port,
+            std::io::Error::last_os_error()
+        ));
     }
     let mut ioport = x86_64::instructions::port::Port::new(port);
 
     unsafe {
         ioport.write(data);
     }
+    Ok(())
 }
 
 #[cfg(target_arch = "aarch64")]
-fn notify_hypervisor_agent_started() {
+fn notify_hypervisor_agent_started() -> Result<()> {
     const SYS_CTRL_MMIO_BASE: libc::off_t = 0x0903_0000;
     const SYS_VSOCK_SERVER: u8 = 1 << 3;
     const MMIO_LEN: usize = 0x1000;
@@ -1861,25 +1867,15 @@ fn notify_hypervisor_agent_started() {
     if !Path::new("/dev/mem").exists() {
         let mode = stat::Mode::from_bits_truncate(0o600);
         let dev = stat::makedev(1, 1);
-        if let Err(e) = stat::mknod("/dev/mem", stat::SFlag::S_IFCHR, mode, dev) {
-            error!(
-                sl!(),
-                "failed to create /dev/mem for startup notification: {}", e
-            );
-            return;
-        }
+        stat::mknod("/dev/mem", stat::SFlag::S_IFCHR, mode, dev)
+            .context("create /dev/mem for sys_ctrl startup notification")?;
     }
 
-    let mem = match OpenOptions::new().read(true).write(true).open("/dev/mem") {
-        Ok(mem) => mem,
-        Err(e) => {
-            error!(
-                sl!(),
-                "failed to open /dev/mem for startup notification: {}", e
-            );
-            return;
-        }
-    };
+    let mem = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/mem")
+        .context("open /dev/mem for sys_ctrl startup notification")?;
 
     let map = unsafe {
         libc::mmap(
@@ -1892,32 +1888,33 @@ fn notify_hypervisor_agent_started() {
         )
     };
     if map == libc::MAP_FAILED {
-        let e = std::io::Error::last_os_error();
-        error!(
-            sl!(),
-            "failed to map sys_ctrl MMIO for startup notification: {}", e
-        );
-        return;
+        return Err(anyhow!(
+            "mmap sys_ctrl MMIO address 0x{:x} for startup notification failed: {}",
+            SYS_CTRL_MMIO_BASE,
+            std::io::Error::last_os_error()
+        ));
     }
 
     unsafe {
         std::ptr::write_volatile(map as *mut u8, SYS_VSOCK_SERVER);
         if libc::munmap(map, MMIO_LEN) != 0 {
-            let e = std::io::Error::last_os_error();
             warn!(
                 sl!(),
-                "failed to unmap sys_ctrl MMIO after startup notification: {}", e
+                "failed to unmap sys_ctrl MMIO after startup notification: {}",
+                std::io::Error::last_os_error()
             );
         }
     }
+    Ok(())
 }
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-fn notify_hypervisor_agent_started() {
+fn notify_hypervisor_agent_started() -> Result<()> {
     debug!(
         sl!(),
         "startup notification is not supported on this architecture"
     );
+    Ok(())
 }
 
 // This function updates the container namespaces configuration based on the
