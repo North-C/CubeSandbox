@@ -110,18 +110,72 @@ check_proxy_cert_preflight() {
   :
 }
 
+yaml_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "${value}"
+}
+
 generate_cubemaster_config_ports() {
   [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
 
   local cfg="${PKG_ROOT}/CubeMaster/conf.yaml"
-  local mysql_port="${CUBE_SANDBOX_MYSQL_PORT:-3306}"
-  local redis_port="${CUBE_SANDBOX_REDIS_PORT:-6379}"
+  local cubemaster_port="${CUBEMASTER_ADDR:-127.0.0.1:8089}"
+  local mysql_addr="${CUBEMASTER_MYSQL_ADDR:-127.0.0.1:${CUBE_SANDBOX_MYSQL_PORT:-3306}}"
+  local mysql_user="${CUBEMASTER_MYSQL_USER:-${CUBE_SANDBOX_MYSQL_USER:-cube}}"
+  local mysql_pwd="${CUBEMASTER_MYSQL_PASSWORD:-${CUBE_SANDBOX_MYSQL_PASSWORD:-cube_pass}}"
+  local mysql_db="${CUBEMASTER_MYSQL_DB:-${CUBE_SANDBOX_MYSQL_DB:-cube_mvp}}"
+  local redis_addr="${CUBEMASTER_REDIS_ADDR:-127.0.0.1:${CUBE_SANDBOX_REDIS_PORT:-6379}}"
+  local redis_pwd="${CUBEMASTER_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
+  local tmp_cfg
+  cubemaster_port="${cubemaster_port##*:}"
 
   ensure_file "${cfg}"
-  sed -i \
-    -e "s|__CUBE_SANDBOX_MYSQL_PORT__|${mysql_port}|g" \
-    -e "s|__CUBE_SANDBOX_REDIS_PORT__|${redis_port}|g" \
-    "${cfg}"
+  tmp_cfg="${cfg}.tmp.$$"
+  awk \
+    -v cubemaster_port="${cubemaster_port}" \
+    -v mysql_addr="$(yaml_quote "${mysql_addr}")" \
+    -v mysql_user="$(yaml_quote "${mysql_user}")" \
+    -v mysql_pwd="$(yaml_quote "${mysql_pwd}")" \
+    -v mysql_db="$(yaml_quote "${mysql_db}")" \
+    -v redis_addr="$(yaml_quote "${redis_addr}")" \
+    -v redis_pwd="$(yaml_quote "${redis_pwd}")" \
+    '
+      /^[A-Za-z0-9_]+:[[:space:]]*$/ {
+        section = $1
+        sub(/:$/, "", section)
+      }
+      section == "common" {
+        if ($1 == "http_port:") { print "  http_port: " cubemaster_port; next }
+      }
+      section == "ossdb_config" || section == "instance_db_config" {
+        if ($1 == "addr:") { print "  addr: " mysql_addr; next }
+        if ($1 == "user:") { print "  user: " mysql_user; next }
+        if ($1 == "pwd:") { print "  pwd: " mysql_pwd; next }
+        if ($1 == "db_name:") { print "  db_name: " mysql_db; next }
+      }
+      section == "redis" || section == "redis_read" || section == "redis_write" {
+        if ($1 == "nodes:") { print "  nodes: " redis_addr; next }
+        if ($1 == "password:") { print "  password: " redis_pwd; next }
+      }
+      { print }
+    ' "${cfg}" > "${tmp_cfg}"
+  mv -f "${tmp_cfg}" "${cfg}"
+}
+
+load_packaged_docker_images() {
+  local image_dir="${INSTALL_PREFIX}/docker-images"
+  local image_tar
+  [[ "${DEPLOY_ROLE}" != "compute" ]] || return 0
+  [[ -d "${image_dir}" ]] || return 0
+
+  shopt -s nullglob
+  for image_tar in "${image_dir}"/*.tar; do
+    log "loading packaged docker image: ${image_tar}"
+    docker load -i "${image_tar}" >/dev/null
+  done
+  shopt -u nullglob
 }
 
 check_hardware_preflight() {
@@ -438,6 +492,7 @@ if [[ "${INSTALL_PREFIX%/}" == "${TOOLBOX_ROOT%/}" ]]; then
     "${INSTALL_PREFIX}/coredns" \
     "${INSTALL_PREFIX}/webui" \
     "${INSTALL_PREFIX}/support" \
+    "${INSTALL_PREFIX}/docker-images" \
     "${INSTALL_PREFIX}/systemd" \
     "${INSTALL_PREFIX}/cube-shim" \
     "${INSTALL_PREFIX}/cube-kernel-scf" \
@@ -528,6 +583,8 @@ chmod +x "${INSTALL_PREFIX}/Cubelet/bin/"*
 chmod +x "${INSTALL_PREFIX}/cube-shim/bin/containerd-shim-cube-rs" "${INSTALL_PREFIX}/cube-shim/bin/cube-runtime"
 chmod +x "${INSTALL_PREFIX}/scripts/one-click/"*.sh
 chmod +x "${INSTALL_PREFIX}/scripts/systemd/"*.sh
+
+load_packaged_docker_images
 
 if [[ -n "${CUBE_SANDBOX_ETH_NAME:-}" ]]; then
   cubelet_config="${INSTALL_PREFIX}/Cubelet/config/config.toml"

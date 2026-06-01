@@ -14,6 +14,7 @@ EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/webui-start.sh
 ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/webui-postcheck.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/webui-stop.sh
+TimeoutStartSec=180s
 Restart=on-failure
 RestartSec=2s
 

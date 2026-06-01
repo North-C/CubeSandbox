@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/common.sh"
 require_root
 require_cmd docker
 
-MYSQL_IMAGE="${CUBE_SANDBOX_MYSQL_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0}"
+MYSQL_IMAGE="${CUBE_SANDBOX_MYSQL_IMAGE:-$(default_support_mysql_image)}"
 MYSQL_CONTAINER="${CUBE_SANDBOX_MYSQL_CONTAINER:-cube-sandbox-mysql}"
 MYSQL_VOLUME="${CUBE_SANDBOX_MYSQL_VOLUME:-cube-sandbox-mysql-data}"
 MYSQL_PORT="${CUBE_SANDBOX_MYSQL_PORT:-3306}"

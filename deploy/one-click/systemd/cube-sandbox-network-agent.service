@@ -12,6 +12,7 @@ WorkingDirectory=/usr/local/services/cubetoolbox
 EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/network-agent-start.sh
 ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/network-agent-postcheck.sh
+TimeoutStartSec=300s
 Restart=on-failure
 RestartSec=2s
 

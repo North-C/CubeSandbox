@@ -17,7 +17,7 @@ if [[ "${WEB_UI_ENABLE}" != "1" ]]; then
 fi
 
 WEBUI_DIR="${TOOLBOX_ROOT}/webui"
-WEB_UI_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
+WEB_UI_IMAGE="${WEB_UI_IMAGE:-$(default_openresty_image)}"
 WEB_UI_CONTAINER_NAME="${WEB_UI_CONTAINER_NAME:-cube-webui}"
 WEB_UI_HOST_PORT="${WEB_UI_HOST_PORT:-12088}"
 WEB_UI_UPSTREAM="${WEB_UI_UPSTREAM:-http://host.docker.internal:3000}"

@@ -10,7 +10,7 @@ source "${SCRIPT_DIR}/common.sh"
 require_root
 require_cmd docker
 
-REDIS_IMAGE="${CUBE_SANDBOX_REDIS_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine}"
+REDIS_IMAGE="${CUBE_SANDBOX_REDIS_IMAGE:-$(default_support_redis_image)}"
 REDIS_CONTAINER="${CUBE_SANDBOX_REDIS_CONTAINER:-cube-sandbox-redis}"
 REDIS_VOLUME="${CUBE_SANDBOX_REDIS_VOLUME:-cube-sandbox-redis-data}"
 REDIS_PORT="${CUBE_SANDBOX_REDIS_PORT:-6379}"

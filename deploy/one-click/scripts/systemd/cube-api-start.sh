@@ -20,6 +20,10 @@ export LOG_DIR="${CUBE_API_LOG_DIR}"
 export CUBE_API_BIND="${CUBE_API_BIND:-0.0.0.0:3000}"
 export CUBE_API_SANDBOX_DOMAIN="${CUBE_API_SANDBOX_DOMAIN:-cube.app}"
 if [[ -n "${CUBE_MASTER_ADDR:-}" ]]; then
+  CUBE_MASTER_ADDR="$(normalize_http_url "${CUBE_MASTER_ADDR}")"
+  export CUBE_MASTER_ADDR
+elif [[ -n "${CUBEMASTER_ADDR:-}" ]]; then
+  CUBE_MASTER_ADDR="$(normalize_http_url "${CUBEMASTER_ADDR}")"
   export CUBE_MASTER_ADDR
 fi
 if [[ -n "${AUTH_CALLBACK_URL:-}" ]]; then

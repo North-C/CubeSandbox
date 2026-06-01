@@ -79,6 +79,70 @@ is_compute_role() {
   [[ "$(one_click_deploy_role)" == "compute" ]]
 }
 
+normalize_one_click_arch() {
+  local raw="${1:-}"
+  case "${raw}" in
+    amd64|x86_64|linux/amd64|linux-amd64)
+      printf 'amd64\n'
+      ;;
+    arm64|aarch64|linux/arm64|linux-arm64)
+      printf 'arm64\n'
+      ;;
+    *)
+      die "unsupported one-click target arch: ${raw:-<empty>} (expected amd64 or arm64)"
+      ;;
+  esac
+}
+
+detect_host_one_click_arch() {
+  normalize_one_click_arch "$(uname -m)"
+}
+
+one_click_target_arch() {
+  if [[ -n "${ONE_CLICK_TARGET_ARCH:-}" ]]; then
+    normalize_one_click_arch "${ONE_CLICK_TARGET_ARCH}"
+    return 0
+  fi
+
+  detect_host_one_click_arch
+}
+
+default_support_mysql_image() {
+  case "$(one_click_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0\n' ;;
+    arm64) printf 'mysql:8.0\n' ;;
+  esac
+}
+
+default_support_redis_image() {
+  case "$(one_click_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine\n' ;;
+    arm64) printf 'redis:7-alpine\n' ;;
+  esac
+}
+
+default_coredns_image() {
+  case "$(one_click_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2\n' ;;
+    arm64) printf 'coredns/coredns:1.14.2\n' ;;
+  esac
+}
+
+default_openresty_image() {
+  case "$(one_click_target_arch)" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat\n' ;;
+    arm64) printf 'openresty/openresty:1.21.4.1-6-alpine-fat\n' ;;
+  esac
+}
+
+normalize_http_url() {
+  local value="$1"
+  case "${value}" in
+    http://*|https://*) printf '%s\n' "${value}" ;;
+    *) printf 'http://%s\n' "${value}" ;;
+  esac
+}
+
 resolve_control_plane_cubemaster_addr() {
   local role
   role="$(one_click_deploy_role)"
@@ -145,8 +209,18 @@ container_exists() {
 
 docker_rm_if_exists() {
   local name="$1"
+  local timeout="${2:-20}"
+  local i
+
   if container_exists "${name}"; then
     docker rm -f "${name}" >/dev/null 2>&1 || true
+    for ((i = 1; i <= timeout; i++)); do
+      if ! container_exists "${name}"; then
+        return 0
+      fi
+      sleep 1
+    done
+    die "failed to remove docker container: ${name}"
   fi
 }
 
@@ -246,7 +320,7 @@ wait_for_tcp_port() {
 
   require_cmd ss
   for ((i = 1; i <= retries; i++)); do
-    if ss -lnt "( sport = :${port} )" | rg -q -- ":${port}"; then
+    if ss -H -lnt "( sport = :${port} )" | awk 'NF > 0 { found = 1 } END { exit(found ? 0 : 1) }'; then
       return 0
     fi
     sleep "${delay}"
@@ -267,6 +341,13 @@ wait_for_container_health() {
     if [[ "${status}" == "healthy" || "${status}" == "running" ]]; then
       return 0
     fi
+    case "${status}" in
+      ""|created|restarting|starting)
+        ;;
+      exited|dead|removing)
+        return 1
+        ;;
+    esac
     sleep "${delay}"
   done
   return 1

@@ -14,6 +14,7 @@ EnvironmentFile=-/usr/local/services/cubetoolbox/.one-click.env
 ExecStart=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-start.sh
 ExecStartPost=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-postcheck.sh
 ExecStop=/usr/local/services/cubetoolbox/scripts/systemd/cube-proxy-stop.sh
+TimeoutStartSec=300s
 Restart=on-failure
 RestartSec=2s
 

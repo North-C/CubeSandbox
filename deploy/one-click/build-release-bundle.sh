@@ -29,6 +29,9 @@ CUBE_PROXY_SOURCE_DIR="${ONE_CLICK_CUBE_PROXY_SOURCE_DIR:-${ROOT_DIR}/CubeProxy}
 WEB_SOURCE_DIR="${ONE_CLICK_WEB_SOURCE_DIR:-${ROOT_DIR}/web}"
 WEB_DIST_OVERRIDE="${ONE_CLICK_WEB_DIST_DIR:-}"
 MKCERT_BIN_ASSET="${ONE_CLICK_MKCERT_BIN:-${SCRIPT_DIR}/assets/bin/mkcert}"
+DOCKER_IMAGE_TAR_DIR="${ONE_CLICK_DOCKER_IMAGE_TAR_DIR:-${SCRIPT_DIR}/dist/docker-images}"
+INCLUDE_DOCKER_IMAGES="${ONE_CLICK_INCLUDE_DOCKER_IMAGES:-0}"
+BUILD_DOCKER_IMAGE_TARS="${ONE_CLICK_BUILD_DOCKER_IMAGE_TARS:-0}"
 CUBE_KERNEL_VMLINUX="${ONE_CLICK_CUBE_KERNEL_VMLINUX:-$(one_click_default_kernel_vmlinux "${RAW_ARTIFACTS_DIR}" "${TARGET_ARCH}")}"
 KERNEL_ARTIFACT_ZIP="${WORK_ROOT}/cube-kernel-scf.zip"
 DIST_VERSION="${ONE_CLICK_DIST_VERSION:-$(latest_git_revision "${ROOT_DIR}")}"
@@ -201,6 +204,99 @@ build_web_dist() {
   ensure_file "${output_dir}/index.html"
 }
 
+copy_docker_image_tars() {
+  local src_dir="$1"
+  local dst_dir="$2"
+  local copied=0
+  local image_tar
+
+  [[ -d "${src_dir}" ]] || die "docker image tar directory not found: ${src_dir}"
+  mkdir -p "${dst_dir}"
+
+  shopt -s nullglob
+  for image_tar in "${src_dir}"/*.tar; do
+    copy_file "${image_tar}" "${dst_dir}/$(basename "${image_tar}")"
+    copied=1
+  done
+  shopt -u nullglob
+
+  [[ "${copied}" == "1" ]] || die "no docker image tar files found under ${src_dir}"
+  log "packaged docker image tar files from ${src_dir}"
+}
+
+write_cube_proxy_image_stamp() {
+  local proxy_image="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
+  local proxy_context_hash
+
+  proxy_context_hash="$(tar -C "${PACKAGE_ROOT}/cubeproxy/build-context" -cf - . | sha256sum | awk '{print $1}')"
+  printf '%s\n' "${proxy_image}:${proxy_context_hash}" > "${PACKAGE_ROOT}/cubeproxy/.image-build-stamp"
+}
+
+default_support_mysql_image() {
+  case "${TARGET_ARCH}" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/mysql:8.0\n' ;;
+    arm64) printf 'mysql:8.0\n' ;;
+  esac
+}
+
+default_support_redis_image() {
+  case "${TARGET_ARCH}" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/redis:7-alpine\n' ;;
+    arm64) printf 'redis:7-alpine\n' ;;
+  esac
+}
+
+default_coredns_image() {
+  case "${TARGET_ARCH}" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/coredns/coredns:1.14.2\n' ;;
+    arm64) printf 'coredns/coredns:1.14.2\n' ;;
+  esac
+}
+
+default_openresty_image() {
+  case "${TARGET_ARCH}" in
+    amd64) printf 'cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat\n' ;;
+    arm64) printf 'openresty/openresty:1.21.4.1-6-alpine-fat\n' ;;
+  esac
+}
+
+build_docker_image_tars() {
+  require_cmd docker
+
+  local image_dir="$1"
+  local mysql_image="${CUBE_SANDBOX_MYSQL_IMAGE:-$(default_support_mysql_image)}"
+  local redis_image="${CUBE_SANDBOX_REDIS_IMAGE:-$(default_support_redis_image)}"
+  local coredns_image="${CUBE_PROXY_COREDNS_IMAGE:-$(default_coredns_image)}"
+  local openresty_image="${WEB_UI_IMAGE:-$(default_openresty_image)}"
+  local proxy_image="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
+  local proxy_base_image="${CUBE_PROXY_BASE_IMAGE:-$(default_openresty_image)}"
+  local proxy_context_hash
+
+  rm -rf "${image_dir}"
+  mkdir -p "${image_dir}"
+
+  log "pulling support docker images for ${TARGET_ARCH}"
+  docker pull --platform "linux/${TARGET_ARCH}" "${mysql_image}" >&2
+  docker pull --platform "linux/${TARGET_ARCH}" "${redis_image}" >&2
+  docker pull --platform "linux/${TARGET_ARCH}" "${coredns_image}" >&2
+  docker pull --platform "linux/${TARGET_ARCH}" "${openresty_image}" >&2
+
+  log "building cube-proxy docker image ${proxy_image}"
+  docker build \
+    --platform "linux/${TARGET_ARCH}" \
+    --build-arg "CUBE_PROXY_BASE_IMAGE=${proxy_base_image}" \
+    -t "${proxy_image}" \
+    "${PACKAGE_ROOT}/cubeproxy/build-context" >&2
+  write_cube_proxy_image_stamp
+
+  docker save -o "${image_dir}/mysql-8.0.tar" "${mysql_image}"
+  docker save -o "${image_dir}/redis-7-alpine.tar" "${redis_image}"
+  docker save -o "${image_dir}/coredns-1.14.2.tar" "${coredns_image}"
+  docker save -o "${image_dir}/openresty-1.21.4.1-6-alpine-fat.tar" "${openresty_image}"
+  docker save -o "${image_dir}/cube-proxy-one-click.tar" "${proxy_image}"
+  log "docker image tar files ready under ${image_dir}"
+}
+
 ensure_kernel_vmlinux "${CUBE_KERNEL_VMLINUX}" "${RAW_ARTIFACTS_DIR}"
 ensure_dir "${CUBE_PROXY_TEMPLATE_DIR}"
 ensure_dir "${CUBE_COREDNS_TEMPLATE_DIR}"
@@ -266,6 +362,7 @@ mkdir -p \
   "${PACKAGE_ROOT}/webui/dist" \
   "${PACKAGE_ROOT}/support" \
   "${PACKAGE_ROOT}/support/bin" \
+  "${PACKAGE_ROOT}/docker-images" \
   "${PACKAGE_ROOT}/systemd" \
   "${PACKAGE_ROOT}/cube-vs/network" \
   "${PACKAGE_ROOT}/cube-snapshot" \
@@ -304,9 +401,17 @@ rm -f "${PACKAGE_ROOT}/cubeproxy/build-context/Makefile"
 generate_cube_proxy_nginx_template \
   "${CUBE_PROXY_SOURCE_DIR}/nginx.conf" \
   "${PACKAGE_ROOT}/cubeproxy/nginx.conf.template"
+write_cube_proxy_image_stamp
 build_web_dist "${PACKAGE_ROOT}/webui/dist"
 copy_dir_contents "${CUBE_SUPPORT_TEMPLATE_DIR}" "${PACKAGE_ROOT}/support"
 copy_file "${MKCERT_BIN_ASSET}" "${PACKAGE_ROOT}/support/bin/mkcert"
+if [[ "${BUILD_DOCKER_IMAGE_TARS}" == "1" ]]; then
+  build_docker_image_tars "${DOCKER_IMAGE_TAR_DIR}"
+  INCLUDE_DOCKER_IMAGES=1
+fi
+if [[ "${INCLUDE_DOCKER_IMAGES}" == "1" ]]; then
+  copy_docker_image_tars "${DOCKER_IMAGE_TAR_DIR}" "${PACKAGE_ROOT}/docker-images"
+fi
 
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-shim" "${PACKAGE_ROOT}/cube-shim"
 copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-kernel-scf-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-kernel-scf-linux-${TARGET_ARCH}"
