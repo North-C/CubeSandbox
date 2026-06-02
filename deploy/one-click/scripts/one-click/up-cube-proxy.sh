@@ -26,6 +26,9 @@ COMPOSE_FILE="${PROXY_DIR}/docker-compose.yaml"
 
 CUBE_PROXY_IMAGE_TAG="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
 CUBE_PROXY_CONTAINER_NAME="${CUBE_PROXY_CONTAINER_NAME:-cube-proxy}"
+# cube-proxy is built on top of the same OpenResty image used by the WebUI;
+# WEB_UI_IMAGE controls the base image for both.
+CUBE_PROXY_BASE_IMAGE="${WEB_UI_IMAGE:-cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat}"
 CUBE_SANDBOX_NODE_IP="${CUBE_SANDBOX_NODE_IP:-}"
 CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-127.0.0.1}"
 CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
@@ -117,6 +120,7 @@ render_template_atomic \
   -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}")#g" \
   -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}")#g" \
   -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}")#g" \
+  -e "s#__CUBE_PROXY_BASE_IMAGE__#$(escape_sed "${CUBE_PROXY_BASE_IMAGE}")#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}")#g" \
   -e "s#__CUBE_PROXY_GLOBAL_CONF__#$(escape_sed "${GLOBAL_CONF}")#g" \
   -e "s#__CUBE_PROXY_NGINX_CONF__#$(escape_sed "${NGINX_CONF}")#g"

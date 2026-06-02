@@ -3005,7 +3005,9 @@ impl Transportable for MemoryManager {
                     .map(|(x, y)| x | y)
                     .collect();
 
-                let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, 4096);
+                let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, range.gpa, unsafe {
+                    libc::sysconf(libc::_SC_PAGESIZE) as u64
+                });
 
                 if !sub_table.regions().is_empty() {
                     for r in sub_table.regions() {
@@ -3095,7 +3097,9 @@ impl Migratable for MemoryManager {
                 .map(|(x, y)| x | y)
                 .collect();
 
-            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, 4096);
+            let sub_table = MemoryRangeTable::from_bitmap(dirty_bitmap, r.gpa, unsafe {
+                libc::sysconf(libc::_SC_PAGESIZE) as u64
+            });
 
             if sub_table.regions().is_empty() {
                 info!("Dirty Memory Range Table is empty");
