@@ -1222,3 +1222,66 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 本地 IRQ routing 文件锁限流实验代码已撤回，仅保留本段验证记录。
+
+## MSI-X restore 去掉后置 enable 负向验证
+
+尝试优化：
+
+- 在 `MsixConfig::set_state()` 中保留 `interrupt_source_group.update_many(&configs)`。
+- 临时去掉后续的 `interrupt_source_group.enable()`。
+- 背景是日志显示 `update_many()` 已经注册未 masked vectors，而后续 `enable()` 大多数是 no-op，但少数场景会额外注册 1 个 route 并产生几十到 200ms 左右的 `register_irqfd_ms`。
+- 目标是减少 restore 阶段不必要的 irqfd 注册，降低 `interrupt_group_enable` 的尾部额外开销。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。该临时改动会让 `EnableInterruptRoute` enum 变体变为未使用。
+
+远端 ARM64 构建：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 构建耗时：`4m09s`
+- 临时部署 shim sha256：`2e4ea98e416135d6eba7521b627e713e84645c2430ebf9bb1f4c6166acec0a81`
+- 临时部署 cube-runtime sha256：`7e686e9911e8d2c2422fea580267c482233db4fe8851ee61ab243773f229a835`
+- 回滚备份：`202606031728_msix_no_enable`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py msix-no-enable-smoke-c1-n1 1 1
+./run_create_only_case.py msix-no-enable-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p95 | create p99 | 总耗时 | 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `32.4ms` | `32.4ms` | `32.4ms` | `32.4ms` | `0.0325s` | 清理 `1/1` |
+| c100 n200 | `99.0%` | 未保留 | 未保留 | 未保留 | `993ms` | `1.1371s` | 2 个 `130459` 初始化失败，清理 `198/198` |
+
+日志观察：
+
+- `interrupt_group_enable` 的后置 no-op / 额外注册基本消失，说明改动确实移除了那段额外路径。
+- 但 `interrupt_group_update_many` 本身仍出现 600ms 级长尾：
+  - `total_ms=701.859ms`，`register_irqfd_ms=543.697ms`，`set_gsi_routes_ms=158.157ms`。
+  - `total_ms=625.496ms`，`register_irqfd_ms=442.424ms`，`set_gsi_routes_ms=183.068ms`。
+  - `total_ms=615.585ms`，`register_irqfd_ms=615.129ms`。
+- c100 结果出现 2 个初始化失败，说明该语义调整存在恢复完整性或时序风险。
+
+判断：
+
+- 该优化不保留。
+- 去掉 `enable()` 可以消除一个小的额外注册来源，但不能解决主瓶颈：`update_many()` 内对实际未 masked vectors 的 irqfd 注册和 GSI route 更新。
+- 成功率从稳定基线 `100%` 降到 `99%`，p99 也高于稳定基线约 `805ms`，因此不适合作为保留优化。
+- 后续应继续聚焦 `update_many()` 内部的 route 数量和设备恢复时机，而不是删除 restore 后的保险性 `enable()`。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地和远端 `msix.rs` 临时代码均已撤回，仅保留本段验证记录。
