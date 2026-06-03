@@ -818,3 +818,77 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
 - 但 `set_gsi_routes_ms` 由原先约 `0.1ms` 级变成 p99 约 `218ms`，说明并发刷新同一个 VM 的 GSI routing map 也会产生明显内核/共享结构开销。
 - 该优化是正向但仍需谨慎保留：它减少了共享 mutex 对 `register_irqfd` 的串行化，但把下一层瓶颈暴露为并发 `set_gsi_routing`。
 - 后续更理想的方向是 restore 阶段合并同一 VM 内多个 MSI-X group 的 route update，只在设备 restore 批次末尾调用少量 `set_gsi_routing`；但这需要更大的接口设计，不适合在当前轮次继续快速改动。
+
+## MSI-X set_state 去掉全量 enable 负向验证
+
+尝试优化：
+
+- `MsixConfig::set_state()` 在 restore 时先收集未 mask vector，并调用 `interrupt_source_group.update_many(&configs)`。
+- `update_many()` 已会对未 mask vector 执行 `route.enable()` / `register_irqfd`。
+- 因此尝试移除 `update_many()` 后面的全量 `interrupt_source_group.enable()`，希望减少对整个 MSI-X group 的重复遍历和可能的提前 irqfd 注册。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建：
+
+- 初次构建遇到远端 GitHub 访问超时，`cargo` 卡在 `https://github.com/rust-vmm/vm-fdt`。
+- 按既定策略，从本地 Cargo git cache 打包并推送了缺失依赖 cache：
+  - `vm-fdt-15a5500c6de3ef67`
+  - `mshv-a0c7b8353999776c`
+  - `vfio-2d61e71a0a55b0af`
+  - `vhost-e6137da7836efc78`
+  - `micro-http-b6958a74e1f08106`
+- 补齐后，远端可正常完成 `CubeShim` release 构建。
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py msix-no-enable-smoke-c1-n1 1 1
+./run_create_only_case.py msix-no-enable-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create p99 | 错误数 | 清理 |
+| --- | ---: | ---: | ---: | ---: |
+| c1 n1 smoke | `100%` | `34.336ms` | `0` | `1/1` |
+| c100 n200 | `98%` | `931.550ms` | `4` | `196/196` |
+
+c100 错误类型：
+
+- `CubeMaster returned error code 130459: Failed to initialize the container`
+- `failed to start shim: start failed: failed to create TTRPC connection`
+
+判断：
+
+- 该优化不保留。
+- smoke 可以通过，但 c100 下成功率从上一轮稳定结果的 `100%` 退化到 `98%`，并重新出现 shim TTRPC 连接失败。
+- `set_state()` 后的全量 `enable()` 虽然看起来有重复注册成本，但它仍可能承担了恢复后保证整个 MSI-X group irqfd 注册完整性的作用；直接移除会放大高并发初始化失败风险。
+- 已将本地和远端代码恢复到上一版稳定实现。
+
+恢复验证：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py restore-stable-smoke-c1-n1 1 1
+```
+
+结果：
+
+- create p99：`30.163ms`
+- 成功率：`100%`
+- 清理：`1/1`
+- 清理后 sandbox 数：`0`
+
+恢复后的远端运行时二进制：
+
+- `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+- `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 原子替换备份：`20260603150256`
