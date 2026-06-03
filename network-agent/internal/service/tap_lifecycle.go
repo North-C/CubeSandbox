@@ -94,26 +94,65 @@ func (s *localService) dequeueAbnormalLocked() *tapDevice {
 }
 
 func (s *localService) configurePortMappings(tap *tapDevice, requestedMappings []PortMapping) ([]PortMapping, error) {
+	totalStart := time.Now()
+	var portAllocateDuration time.Duration
+	var portAssignDuration time.Duration
+	var cubevsAddPortMapDuration time.Duration
+	var cleanupDuration time.Duration
+	var resultErr error
+	defer func() {
+		tapName := ""
+		tapIfIndex := 0
+		if tap != nil {
+			tapName = tap.Name
+			tapIfIndex = tap.Index
+		}
+		CubeLog.WithContext(context.Background()).Infof(
+			"network-agent timing configurePortMappings: tap_name=%s ifindex=%d requested_mappings=%d allocate_ms=%.3f assign_ms=%.3f cubevs_add_port_map_ms=%.3f cleanup_ms=%.3f total_ms=%.3f err=%v",
+			tapName,
+			tapIfIndex,
+			len(requestedMappings),
+			durationMillis(portAllocateDuration),
+			durationMillis(portAssignDuration),
+			durationMillis(cubevsAddPortMapDuration),
+			durationMillis(cleanupDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	actualMappings := make([]PortMapping, 0, len(requestedMappings))
 	for _, mapping := range requestedMappings {
 		hostPort := mapping.HostPort
 		if hostPort == 0 {
+			stageStart := time.Now()
 			allocatedPort, err := s.ports.Allocate()
+			portAllocateDuration += time.Since(stageStart)
 			if err != nil {
+				stageStart = time.Now()
 				s.clearPortMappings(tap)
+				cleanupDuration += time.Since(stageStart)
+				resultErr = err
 				return nil, err
 			}
 			hostPort = int32(allocatedPort)
 		} else {
+			stageStart := time.Now()
 			s.ports.Assign(uint16(hostPort))
+			portAssignDuration += time.Since(stageStart)
 		}
+		stageStart := time.Now()
 		if err := cubevsAddPortMap(uint32(tap.Index), uint16(mapping.ContainerPort), uint16(hostPort)); err != nil {
+			cubevsAddPortMapDuration += time.Since(stageStart)
 			if mapping.HostPort == 0 {
 				s.ports.Release(uint16(hostPort))
 			}
+			stageStart = time.Now()
 			s.clearPortMappings(tap)
+			cleanupDuration += time.Since(stageStart)
+			resultErr = err
 			return nil, err
 		}
+		cubevsAddPortMapDuration += time.Since(stageStart)
 		actualMappings = append(actualMappings, PortMapping{
 			Protocol:      nonEmpty(mapping.Protocol, "tcp"),
 			HostIP:        nonEmpty(mapping.HostIP, s.cfg.HostProxyBindIP),

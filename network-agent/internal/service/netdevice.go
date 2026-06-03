@@ -11,9 +11,9 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 	"unsafe"
 
-	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
 	CubeLog "github.com/tencentcloud/CubeSandbox/cubelog"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -56,15 +56,17 @@ type cubeDev struct {
 }
 
 type tapDevice struct {
-	Index        int
-	Name         string
-	IP           net.IP
-	InUse        bool
-	File         *os.File
-	PortMappings []PortMapping
-	FailureCount int
-	LastError    string
-	LastStage    string
+	Index          int
+	Name           string
+	IP             net.IP
+	InUse          bool
+	File           *os.File
+	FilterAttached bool
+	ARPInstalled   bool
+	PortMappings   []PortMapping
+	FailureCount   int
+	LastError      string
+	LastStage      string
 }
 
 func disableGRO(ifName string) error {
@@ -314,8 +316,30 @@ func ensureRouteToCubeDev(cidr string, dev *cubeDev) error {
 }
 
 func newTap(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (_ *tapDevice, retErr error) {
+	totalStart := time.Now()
+	var linkAddDuration time.Duration
+	var setVnetHdrDuration time.Duration
+	var linkSetUpDuration time.Duration
+	var attachFilterDuration time.Duration
+	var setMTUDuration time.Duration
+	var addARPDuration time.Duration
 	logger := CubeLog.WithContext(context.Background())
 	name := tapName(ip.String())
+	defer func() {
+		logger.Infof(
+			"network-agent timing newTap: name=%s ip=%s link_add_ms=%.3f set_vnet_hdr_ms=%.3f link_set_up_ms=%.3f attach_filter_ms=%.3f set_mtu_ms=%.3f add_arp_ms=%.3f total_ms=%.3f err=%v",
+			name,
+			ip.String(),
+			durationMillis(linkAddDuration),
+			durationMillis(setVnetHdrDuration),
+			durationMillis(linkSetUpDuration),
+			durationMillis(attachFilterDuration),
+			durationMillis(setMTUDuration),
+			durationMillis(addARPDuration),
+			durationMillis(time.Since(totalStart)),
+			retErr,
+		)
+	}()
 	tapConfig := &netlink.Tuntap{
 		LinkAttrs: netlink.LinkAttrs{
 			Name:  name,
@@ -327,10 +351,13 @@ func newTap(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (_ *tapDevice, re
 	}
 	logger.Infof("network-agent newTap begin: name=%s ip=%s mtu=%d cube_dev_idx=%d flags=0x%x queues=%d",
 		name, ip.String(), mtu, cubeDevIdx, tapConfig.Flags, tapConfig.Queues)
+	stageStart := time.Now()
 	if err := netlink.LinkAdd(tapConfig); err != nil {
+		linkAddDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap link add failed: name=%s err=%v", name, err)
 		return nil, err
 	}
+	linkAddDuration = time.Since(stageStart)
 	defer func() {
 		if retErr != nil {
 			logger.Warnf("network-agent newTap cleanup after failure: name=%s ifindex=%d err=%v", name, tapConfig.Index, retErr)
@@ -350,31 +377,48 @@ func newTap(ip net.IP, mvmMacAddr string, mtu, cubeDevIdx int) (_ *tapDevice, re
 	tap.File = tapConfig.Fds[0]
 	logger.Infof("network-agent newTap link add done: name=%s ifindex=%d fd=%d", tap.Name, tap.Index, tap.File.Fd())
 	size := virtioNetHdrSize
+	stageStart = time.Now()
 	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, tap.File.Fd(), uintptr(unix.TUNSETVNETHDRSZ), uintptr(unsafe.Pointer(&size))); errno != 0 {
+		setVnetHdrDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap set vnet hdr failed: name=%s fd=%d size=%d errno=%v", tap.Name, tap.File.Fd(), size, errno)
 		return nil, fmt.Errorf("set tap(%s) vnet hdr failed: %v", tap.Name, errno)
 	}
+	setVnetHdrDuration = time.Since(stageStart)
 	logger.Infof("network-agent newTap set vnet hdr done: name=%s fd=%d size=%d", tap.Name, tap.File.Fd(), size)
+	stageStart = time.Now()
 	if err := netlink.LinkSetUp(tapConfig); err != nil {
+		linkSetUpDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap link set up failed: name=%s ifindex=%d err=%v", tap.Name, tap.Index, err)
 		return nil, err
 	}
+	linkSetUpDuration = time.Since(stageStart)
 	logger.Infof("network-agent newTap link set up done: name=%s ifindex=%d", tap.Name, tap.Index)
-	if err := cubevs.AttachFilter(uint32(tap.Index)); err != nil {
+	stageStart = time.Now()
+	if err := cubevsAttachFilter(uint32(tap.Index)); err != nil {
+		attachFilterDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap attach filter failed: name=%s ifindex=%d err=%v", tap.Name, tap.Index, err)
 		return nil, err
 	}
+	attachFilterDuration = time.Since(stageStart)
+	tap.FilterAttached = true
 	logger.Infof("network-agent newTap attach filter done: name=%s ifindex=%d", tap.Name, tap.Index)
+	stageStart = time.Now()
 	if err := netlink.LinkSetMTU(tapConfig, mtu); err != nil {
+		setMTUDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap set mtu failed: name=%s ifindex=%d mtu=%d err=%v", tap.Name, tap.Index, mtu, err)
 		return nil, err
 	}
+	setMTUDuration = time.Since(stageStart)
 	logger.Infof("network-agent newTap set mtu done: name=%s ifindex=%d mtu=%d", tap.Name, tap.Index, mtu)
-	if err := addARPEntry(ip, mvmMacAddr, cubeDevIdx); err != nil && err != syscall.EEXIST {
+	stageStart = time.Now()
+	if err := addARPEntryFunc(ip, mvmMacAddr, cubeDevIdx); err != nil && err != syscall.EEXIST {
+		addARPDuration = time.Since(stageStart)
 		logger.Warnf("network-agent newTap add arp failed: name=%s ifindex=%d ip=%s mac=%s cube_dev_idx=%d err=%v",
 			tap.Name, tap.Index, ip.String(), mvmMacAddr, cubeDevIdx, err)
 		return nil, err
 	}
+	addARPDuration = time.Since(stageStart)
+	tap.ARPInstalled = true
 	logger.Infof("network-agent newTap ready: name=%s ifindex=%d ip=%s fd=%d arp_mac=%s",
 		tap.Name, tap.Index, ip.String(), tap.File.Fd(), mvmMacAddr)
 	return tap, nil
@@ -386,17 +430,43 @@ type ifReq struct {
 }
 
 func getTapFd(name string) (*os.File, error) {
+	totalStart := time.Now()
+	var linkByNameDuration time.Duration
+	var openDuration time.Duration
+	var tunSetIFFDuration time.Duration
+	var setVnetHdrDuration time.Duration
+	var resultErr error
+	logger := CubeLog.WithContext(context.Background())
+	defer func() {
+		logger.Infof(
+			"network-agent timing getTapFd: name=%s link_by_name_ms=%.3f open_tun_ms=%.3f tunsetiff_ms=%.3f set_vnet_hdr_ms=%.3f total_ms=%.3f err=%v",
+			name,
+			durationMillis(linkByNameDuration),
+			durationMillis(openDuration),
+			durationMillis(tunSetIFFDuration),
+			durationMillis(setVnetHdrDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
+	stageStart := time.Now()
 	link, err := netlinkLinkByName(name)
+	linkByNameDuration = time.Since(stageStart)
 	if err != nil {
+		resultErr = err
 		return nil, err
 	}
 	tap, ok := link.(*netlink.Tuntap)
 	if !ok {
-		return nil, fmt.Errorf("%s is not tap", name)
+		resultErr = fmt.Errorf("%s is not tap", name)
+		return nil, resultErr
 	}
 
+	stageStart = time.Now()
 	fd, err := unixOpen(tunDevicePath, os.O_RDWR|syscall.O_CLOEXEC, 0)
+	openDuration = time.Since(stageStart)
 	if err != nil {
+		resultErr = err
 		return nil, err
 	}
 
@@ -404,74 +474,155 @@ func getTapFd(name string) (*os.File, error) {
 	copy(req.Name[:15], tap.Name)
 	req.Flags = unix.IFF_TAP | unix.IFF_NO_PI | unix.IFF_VNET_HDR | unix.IFF_ONE_QUEUE
 
+	stageStart = time.Now()
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETIFF), uintptr(unsafe.Pointer(&req)))
+	tunSetIFFDuration = time.Since(stageStart)
 	if errno != 0 {
 		unixClose(fd)
-		return nil, fmt.Errorf("set tap(%s) TUNSETIFF failed, errno: %+v", tap.Name, errno)
+		resultErr = fmt.Errorf("set tap(%s) TUNSETIFF failed, errno: %+v", tap.Name, errno)
+		return nil, resultErr
 	}
 
 	size := virtioNetHdrSize
+	stageStart = time.Now()
 	_, _, errno = unix.Syscall(unix.SYS_IOCTL, uintptr(fd), uintptr(unix.TUNSETVNETHDRSZ), uintptr(unsafe.Pointer(&size)))
+	setVnetHdrDuration = time.Since(stageStart)
 	if errno != 0 {
 		unixClose(fd)
-		return nil, fmt.Errorf("set tap(%s) vnet hdr failed, errno: %+v", tap.Name, errno)
+		resultErr = fmt.Errorf("set tap(%s) vnet hdr failed, errno: %+v", tap.Name, errno)
+		return nil, resultErr
 	}
 
 	return os.NewFile(uintptr(fd), tunDevicePath), nil
 }
 
 func restoreTap(tap *tapDevice, mtu int, mvmMacAddr string, cubeDevIdx int) (*tapDevice, error) {
+	totalStart := time.Now()
+	var linkByNameDuration time.Duration
+	var getTapFdDuration time.Duration
+	var linkSetUpDuration time.Duration
+	var setMTUDuration time.Duration
+	var attachFilterDuration time.Duration
+	attachFilterSkipped := false
+	var addARPDuration time.Duration
+	addARPSkipped := false
+	var resultErr error
+	nameForLog := ""
+	ipForLog := ""
+	if tap != nil {
+		nameForLog = tap.Name
+		if tap.IP != nil {
+			ipForLog = tap.IP.String()
+		}
+	}
+	logger := CubeLog.WithContext(context.Background())
+	defer func() {
+		logger.Infof(
+			"network-agent timing restoreTap: name=%s ip=%s link_by_name_ms=%.3f get_tap_fd_ms=%.3f link_set_up_ms=%.3f set_mtu_ms=%.3f attach_filter_ms=%.3f attach_filter_skipped=%t add_arp_ms=%.3f add_arp_skipped=%t total_ms=%.3f err=%v",
+			nameForLog,
+			ipForLog,
+			durationMillis(linkByNameDuration),
+			durationMillis(getTapFdDuration),
+			durationMillis(linkSetUpDuration),
+			durationMillis(setMTUDuration),
+			durationMillis(attachFilterDuration),
+			attachFilterSkipped,
+			durationMillis(addARPDuration),
+			addARPSkipped,
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	if tap == nil {
-		return nil, fmt.Errorf("tap is nil")
+		resultErr = fmt.Errorf("tap is nil")
+		return nil, resultErr
 	}
 	if tap.IP == nil {
-		return nil, fmt.Errorf("tap %q missing ip", tap.Name)
+		resultErr = fmt.Errorf("tap %q missing ip", tap.Name)
+		return nil, resultErr
 	}
 	name := tap.Name
 	if name == "" {
 		name = tapName(tap.IP.String())
 	}
+	nameForLog = name
+	ipForLog = tap.IP.String()
 
+	stageStart := time.Now()
 	link, err := netlinkLinkByName(name)
+	linkByNameDuration = time.Since(stageStart)
 	if err != nil {
+		resultErr = err
 		return nil, err
 	}
 	sysTap, ok := link.(*netlink.Tuntap)
 	if !ok {
-		return nil, fmt.Errorf("%s is not tap", name)
+		resultErr = fmt.Errorf("%s is not tap", name)
+		return nil, resultErr
 	}
 
 	restored := &tapDevice{
-		Name:         name,
-		Index:        sysTap.Index,
-		IP:           tap.IP.To4(),
-		InUse:        link.Attrs().RawFlags&unix.IFF_LOWER_UP > 0,
-		File:         tap.File,
-		PortMappings: append([]PortMapping(nil), tap.PortMappings...),
+		Name:           name,
+		Index:          sysTap.Index,
+		IP:             tap.IP.To4(),
+		InUse:          link.Attrs().RawFlags&unix.IFF_LOWER_UP > 0,
+		File:           tap.File,
+		FilterAttached: tap.FilterAttached && tap.Index == sysTap.Index,
+		ARPInstalled:   tap.ARPInstalled && tap.Index == sysTap.Index,
+		PortMappings:   append([]PortMapping(nil), tap.PortMappings...),
 	}
 
 	if restored.File == nil {
+		stageStart = time.Now()
 		restored.File, err = getTapFd(name)
+		getTapFdDuration = time.Since(stageStart)
 		if err != nil {
+			resultErr = err
 			return nil, err
 		}
 	}
 
 	if link.Attrs().Flags&net.FlagUp == 0 {
+		stageStart = time.Now()
 		if err := netlink.LinkSetUp(link); err != nil {
+			linkSetUpDuration = time.Since(stageStart)
+			resultErr = err
 			return nil, err
 		}
+		linkSetUpDuration = time.Since(stageStart)
 	}
 	if sysTap.MTU != mtu {
+		stageStart = time.Now()
 		if err := netlink.LinkSetMTU(sysTap, mtu); err != nil {
+			setMTUDuration = time.Since(stageStart)
+			resultErr = err
 			return nil, err
 		}
+		setMTUDuration = time.Since(stageStart)
 	}
-	if err := cubevs.AttachFilter(uint32(restored.Index)); err != nil {
-		return nil, err
+	if !restored.FilterAttached {
+		stageStart = time.Now()
+		if err := cubevsAttachFilter(uint32(restored.Index)); err != nil {
+			attachFilterDuration = time.Since(stageStart)
+			resultErr = err
+			return nil, err
+		}
+		attachFilterDuration = time.Since(stageStart)
+		restored.FilterAttached = true
+	} else {
+		attachFilterSkipped = true
 	}
-	if err := addARPEntry(restored.IP, mvmMacAddr, cubeDevIdx); err != nil && !errors.Is(err, syscall.EEXIST) {
-		return nil, err
+	if !restored.ARPInstalled {
+		stageStart = time.Now()
+		if err := addARPEntryFunc(restored.IP, mvmMacAddr, cubeDevIdx); err != nil && !errors.Is(err, syscall.EEXIST) {
+			addARPDuration = time.Since(stageStart)
+			resultErr = err
+			return nil, err
+		}
+		addARPDuration = time.Since(stageStart)
+		restored.ARPInstalled = true
+	} else {
+		addARPSkipped = true
 	}
 	return restored, nil
 }

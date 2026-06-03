@@ -335,6 +335,194 @@ func TestIsUsableGatewayNeighbor(t *testing.T) {
 	}
 }
 
+func TestRestoreTapSkipsAttachFilterWhenAlreadyAttached(t *testing.T) {
+	originalLinkByName := netlinkLinkByName
+	originalAttach := cubevsAttachFilter
+	originalARP := addARPEntryFunc
+	t.Cleanup(func() {
+		netlinkLinkByName = originalLinkByName
+		cubevsAttachFilter = originalAttach
+		addARPEntryFunc = originalARP
+	})
+
+	tap := &netlink.Tuntap{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  "z192.168.0.2",
+			Index: 42,
+			Flags: net.FlagUp,
+		},
+		Mode: netlink.TUNTAP_MODE_TAP,
+	}
+	netlinkLinkByName = func(name string) (netlink.Link, error) {
+		if name != "z192.168.0.2" {
+			t.Fatalf("LinkByName(%q), want z192.168.0.2", name)
+		}
+		return tap, nil
+	}
+	cubevsAttachFilter = func(uint32) error {
+		t.Fatal("AttachFilter should be skipped for a pooled TAP with FilterAttached=true")
+		return nil
+	}
+	addARPEntryFunc = func(net.IP, string, int) error { return nil }
+
+	restored, err := restoreTap(&tapDevice{
+		Name:           "z192.168.0.2",
+		Index:          42,
+		IP:             net.ParseIP("192.168.0.2").To4(),
+		File:           newTestTapFile(t),
+		FilterAttached: true,
+	}, 0, "20:90:6f:fc:fc:fc", 16)
+	if err != nil {
+		t.Fatalf("restoreTap error=%v", err)
+	}
+	if !restored.FilterAttached {
+		t.Fatal("restored.FilterAttached=false, want true")
+	}
+}
+
+func TestRestoreTapSkipsARPWhenAlreadyInstalled(t *testing.T) {
+	originalLinkByName := netlinkLinkByName
+	originalAttach := cubevsAttachFilter
+	originalARP := addARPEntryFunc
+	t.Cleanup(func() {
+		netlinkLinkByName = originalLinkByName
+		cubevsAttachFilter = originalAttach
+		addARPEntryFunc = originalARP
+	})
+
+	tap := &netlink.Tuntap{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  "z192.168.0.4",
+			Index: 44,
+			Flags: net.FlagUp,
+		},
+		Mode: netlink.TUNTAP_MODE_TAP,
+	}
+	netlinkLinkByName = func(name string) (netlink.Link, error) {
+		if name != "z192.168.0.4" {
+			t.Fatalf("LinkByName(%q), want z192.168.0.4", name)
+		}
+		return tap, nil
+	}
+	cubevsAttachFilter = func(uint32) error { return nil }
+	addARPEntryFunc = func(net.IP, string, int) error {
+		t.Fatal("addARPEntry should be skipped for a pooled TAP with ARPInstalled=true")
+		return nil
+	}
+
+	restored, err := restoreTap(&tapDevice{
+		Name:         "z192.168.0.4",
+		Index:        44,
+		IP:           net.ParseIP("192.168.0.4").To4(),
+		File:         newTestTapFile(t),
+		ARPInstalled: true,
+	}, 0, "20:90:6f:fc:fc:fc", 16)
+	if err != nil {
+		t.Fatalf("restoreTap error=%v", err)
+	}
+	if !restored.ARPInstalled {
+		t.Fatal("restored.ARPInstalled=false, want true")
+	}
+}
+
+func TestRestoreTapAddsARPWhenNotMarkedInstalled(t *testing.T) {
+	originalLinkByName := netlinkLinkByName
+	originalAttach := cubevsAttachFilter
+	originalARP := addARPEntryFunc
+	t.Cleanup(func() {
+		netlinkLinkByName = originalLinkByName
+		cubevsAttachFilter = originalAttach
+		addARPEntryFunc = originalARP
+	})
+
+	tap := &netlink.Tuntap{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  "z192.168.0.5",
+			Index: 45,
+			Flags: net.FlagUp,
+		},
+		Mode: netlink.TUNTAP_MODE_TAP,
+	}
+	netlinkLinkByName = func(string) (netlink.Link, error) { return tap, nil }
+	cubevsAttachFilter = func(uint32) error { return nil }
+	arpCalls := 0
+	addARPEntryFunc = func(ip net.IP, mac string, cubeDevIdx int) error {
+		arpCalls++
+		if ip.String() != "192.168.0.5" {
+			t.Fatalf("addARPEntry ip=%s, want 192.168.0.5", ip.String())
+		}
+		if mac != "20:90:6f:fc:fc:fc" {
+			t.Fatalf("addARPEntry mac=%s, want 20:90:6f:fc:fc:fc", mac)
+		}
+		if cubeDevIdx != 16 {
+			t.Fatalf("addARPEntry cubeDevIdx=%d, want 16", cubeDevIdx)
+		}
+		return nil
+	}
+
+	restored, err := restoreTap(&tapDevice{
+		Name:  "z192.168.0.5",
+		Index: 45,
+		IP:    net.ParseIP("192.168.0.5").To4(),
+		File:  newTestTapFile(t),
+	}, 0, "20:90:6f:fc:fc:fc", 16)
+	if err != nil {
+		t.Fatalf("restoreTap error=%v", err)
+	}
+	if arpCalls != 1 {
+		t.Fatalf("addARPEntry calls=%d, want 1", arpCalls)
+	}
+	if !restored.ARPInstalled {
+		t.Fatal("restored.ARPInstalled=false, want true")
+	}
+}
+
+func TestRestoreTapAttachesFilterWhenNotMarkedAttached(t *testing.T) {
+	originalLinkByName := netlinkLinkByName
+	originalAttach := cubevsAttachFilter
+	originalARP := addARPEntryFunc
+	t.Cleanup(func() {
+		netlinkLinkByName = originalLinkByName
+		cubevsAttachFilter = originalAttach
+		addARPEntryFunc = originalARP
+	})
+
+	tap := &netlink.Tuntap{
+		LinkAttrs: netlink.LinkAttrs{
+			Name:  "z192.168.0.3",
+			Index: 43,
+			Flags: net.FlagUp,
+		},
+		Mode: netlink.TUNTAP_MODE_TAP,
+	}
+	netlinkLinkByName = func(string) (netlink.Link, error) { return tap, nil }
+	attachCalls := 0
+	cubevsAttachFilter = func(ifindex uint32) error {
+		attachCalls++
+		if ifindex != 43 {
+			t.Fatalf("AttachFilter ifindex=%d, want 43", ifindex)
+		}
+		return nil
+	}
+	addARPEntryFunc = func(net.IP, string, int) error { return nil }
+
+	restored, err := restoreTap(&tapDevice{
+		Name:  "z192.168.0.3",
+		Index: 43,
+		IP:    net.ParseIP("192.168.0.3").To4(),
+		File:  newTestTapFile(t),
+	}, 0, "20:90:6f:fc:fc:fc", 16)
+	if err != nil {
+		t.Fatalf("restoreTap error=%v", err)
+	}
+	if attachCalls != 1 {
+		t.Fatalf("AttachFilter calls=%d, want 1", attachCalls)
+	}
+	if !restored.FilterAttached {
+		t.Fatal("restored.FilterAttached=false, want true")
+	}
+}
+
 func mustParseMAC(t *testing.T, value string) net.HardwareAddr {
 	t.Helper()
 	mac, err := net.ParseMAC(value)

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/tencentcloud/CubeSandbox/CubeNet/cubevs"
@@ -58,6 +59,8 @@ type localService struct {
 }
 
 func NewLocalService(cfg Config) (Service, error) {
+	installCubeVSTimingHook()
+
 	if cfg.EthName == "" {
 		return nil, fmt.Errorf("network-agent requires explicit eth_name from cubelet config or flag")
 	}
@@ -151,6 +154,7 @@ func NewLocalService(cfg Config) (Service, error) {
 }
 
 func (s *localService) EnsureNetwork(ctx context.Context, req *EnsureNetworkRequest) (*EnsureNetworkResponse, error) {
+	totalStart := time.Now()
 	CubeLog.WithContext(ctx).Infof(
 		"network-agent EnsureNetwork request: sandbox_id=%s idempotency_key=%s interfaces=%d routes=%d arps=%d port_mappings=%d cubevs_context=%s persist_metadata=%v",
 		req.SandboxID,
@@ -162,13 +166,32 @@ func (s *localService) EnsureNetwork(ctx context.Context, req *EnsureNetworkRequ
 		formatCubeVSContext(req.CubeVSContext),
 		req.PersistMetadata,
 	)
+	lockStart := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	lockWait := time.Since(lockStart)
+	lockAcquired := time.Now()
+	existingHit := false
+	var resultErr error
+	defer func() {
+		lockHold := time.Since(lockAcquired)
+		s.mu.Unlock()
+		CubeLog.WithContext(ctx).Infof(
+			"network-agent timing EnsureNetwork: sandbox_id=%s existing=%t lock_wait_ms=%.3f lock_hold_ms=%.3f total_ms=%.3f err=%v",
+			req.SandboxID,
+			existingHit,
+			durationMillis(lockWait),
+			durationMillis(lockHold),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	if existing, ok := s.states[req.SandboxID]; ok {
+		existingHit = true
 		return existing.ensureResponse(), nil
 	}
 	state, err := s.createStateLocked(ctx, req)
 	if err != nil {
+		resultErr = err
 		return nil, err
 	}
 	s.states[state.SandboxID] = state
@@ -273,28 +296,97 @@ func (s *localService) Health(ctx context.Context) error {
 }
 
 func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetworkRequest) (*managedState, error) {
+	totalStart := time.Now()
+	var ensureHostRouteDuration time.Duration
+	var normalizePortMappingsDuration time.Duration
+	var dequeueTapDuration time.Duration
+	var allocateIPDuration time.Duration
+	var cleanupConflictingTapDuration time.Duration
+	var newTapDuration time.Duration
+	var configurePortMappingsDuration time.Duration
+	var registerCubeVSTapDuration time.Duration
+	var storeSaveDuration time.Duration
+	var resultErr error
+	var tap *tapDevice
+	fromPool := false
+	requestedMappingsCount := len(req.PortMappings)
+	actualMappingsCount := 0
+	defer func() {
+		tapName := ""
+		tapIfIndex := 0
+		tapIP := ""
+		if tap != nil {
+			tapName = tap.Name
+			tapIfIndex = tap.Index
+			if tap.IP != nil {
+				tapIP = tap.IP.String()
+			}
+		}
+		CubeLog.WithContext(ctx).Infof(
+			"network-agent timing createStateLocked: sandbox_id=%s tap_name=%s ifindex=%d sandbox_ip=%s from_pool=%t requested_mappings=%d actual_mappings=%d ensure_host_route_ms=%.3f normalize_port_mappings_ms=%.3f dequeue_tap_ms=%.3f allocate_ip_ms=%.3f cleanup_conflicting_tap_ms=%.3f new_tap_ms=%.3f configure_port_mappings_ms=%.3f register_cubevs_tap_ms=%.3f store_save_ms=%.3f total_ms=%.3f err=%v",
+			req.SandboxID,
+			tapName,
+			tapIfIndex,
+			tapIP,
+			fromPool,
+			requestedMappingsCount,
+			actualMappingsCount,
+			durationMillis(ensureHostRouteDuration),
+			durationMillis(normalizePortMappingsDuration),
+			durationMillis(dequeueTapDuration),
+			durationMillis(allocateIPDuration),
+			durationMillis(cleanupConflictingTapDuration),
+			durationMillis(newTapDuration),
+			durationMillis(configurePortMappingsDuration),
+			durationMillis(registerCubeVSTapDuration),
+			durationMillis(storeSaveDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
+	stageStart := time.Now()
 	if err := s.ensureHostRoute(); err != nil {
+		ensureHostRouteDuration = time.Since(stageStart)
+		resultErr = err
 		return nil, err
 	}
+	ensureHostRouteDuration = time.Since(stageStart)
+	stageStart = time.Now()
 	requestedMappings := s.normalizePortMappings(req.PortMappings)
-	tap := s.dequeueTapLocked()
-	fromPool := tap != nil
+	requestedMappingsCount = len(requestedMappings)
+	normalizePortMappingsDuration = time.Since(stageStart)
+	stageStart = time.Now()
+	tap = s.dequeueTapLocked()
+	dequeueTapDuration = time.Since(stageStart)
+	fromPool = tap != nil
 	if !fromPool {
+		stageStart = time.Now()
 		ip, err := s.allocator.Allocate()
+		allocateIPDuration = time.Since(stageStart)
 		if err != nil {
+			resultErr = err
 			return nil, err
 		}
+		stageStart = time.Now()
 		if err := s.cleanupConflictingTap(ip); err != nil {
+			cleanupConflictingTapDuration = time.Since(stageStart)
 			s.allocator.Release(ip)
+			resultErr = err
 			return nil, err
 		}
+		cleanupConflictingTapDuration = time.Since(stageStart)
+		stageStart = time.Now()
 		tap, err = newTapFunc(ip, s.cfg.MVMMacAddr, s.cfg.MvmMtu, s.cubeDev.Index)
+		newTapDuration = time.Since(stageStart)
 		if err != nil {
 			s.allocator.Release(ip)
+			resultErr = err
 			return nil, err
 		}
 	}
+	stageStart = time.Now()
 	actualMappings, err := s.configurePortMappings(tap, requestedMappings)
+	configurePortMappingsDuration = time.Since(stageStart)
 	if err != nil {
 		if fromPool {
 			s.recycleTapLocked(tap)
@@ -303,9 +395,13 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 			_ = destroyTapFunc(tap.Index)
 			s.allocator.Release(tap.IP)
 		}
+		resultErr = err
 		return nil, err
 	}
+	actualMappingsCount = len(actualMappings)
+	stageStart = time.Now()
 	if err := s.registerCubeVSTap(tap.Index, tap.IP, req.SandboxID, req.CubeVSContext); err != nil {
+		registerCubeVSTapDuration = time.Since(stageStart)
 		s.clearPortMappings(tap)
 		if fromPool {
 			s.recycleTapLocked(tap)
@@ -314,8 +410,10 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 			_ = destroyTapFunc(tap.Index)
 			s.allocator.Release(tap.IP)
 		}
+		resultErr = err
 		return nil, err
 	}
+	registerCubeVSTapDuration = time.Since(stageStart)
 	state := &managedState{
 		persistedState: persistedState{
 			SandboxID:       req.SandboxID,
@@ -332,7 +430,9 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 		},
 		tap: tap,
 	}
+	stageStart = time.Now()
 	if err := s.store.Save(&state.persistedState); err != nil {
+		storeSaveDuration = time.Since(stageStart)
 		_ = cubevsDelTAPDevice(uint32(tap.Index), tap.IP.To4())
 		s.clearPortMappings(tap)
 		if fromPool {
@@ -342,8 +442,10 @@ func (s *localService) createStateLocked(ctx context.Context, req *EnsureNetwork
 			_ = destroyTapFunc(tap.Index)
 			s.allocator.Release(tap.IP)
 		}
+		resultErr = err
 		return nil, err
 	}
+	storeSaveDuration = time.Since(stageStart)
 	return state, nil
 }
 
@@ -709,7 +811,17 @@ func (s *localService) registerCubeVSTap(ifindex int, ip net.IP, sandboxID strin
 		opts.AllowOut,
 		opts.DenyOut,
 	)
-	return cubevsAddTAPDevice(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1), opts)
+	start := time.Now()
+	err := cubevsAddTAPDevice(uint32(ifindex), ip, sandboxID, atomic.AddUint32(&s.version, 1), opts)
+	CubeLog.WithContext(context.Background()).Infof(
+		"network-agent timing registerCubeVSTap: sandbox_id=%s ifindex=%d sandbox_ip=%s cubevs_add_tap_ms=%.3f err=%v",
+		sandboxID,
+		ifindex,
+		ip.String(),
+		durationMillis(time.Since(start)),
+		err,
+	)
+	return err
 }
 
 func cubeVSTapRegistration(ctx *CubeVSContext) cubevs.MVMOptions {
