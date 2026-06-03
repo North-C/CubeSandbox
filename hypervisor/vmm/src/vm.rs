@@ -523,24 +523,31 @@ impl Vm {
         vcpu_started: Arc<AtomicBool>,
     ) -> Result<Self> {
         trace_scoped!("Vm::new_from_memory_manager");
+        let timing_start = Instant::now();
 
+        let stage_start = Instant::now();
         let boot_id_list = config
             .lock()
             .unwrap()
             .validate()
             .map_err(Error::ConfigValidation)?;
+        let validate_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let load_payload_handle = if !restoring {
             Self::load_payload_async(&memory_manager, &config)?
         } else {
             None
         };
+        let load_payload_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         info!("Booting VM from config: {:?}", &config);
 
         // Create NUMA nodes based on NumaConfig.
+        let stage_start = Instant::now();
         let numa_nodes =
             Self::create_numa_nodes(config.lock().unwrap().numa.clone(), &memory_manager)?;
+        let numa_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         #[cfg(feature = "tdx")]
         let tdx_enabled = config.lock().unwrap().is_tdx_enabled();
@@ -554,6 +561,7 @@ impl Vm {
         #[cfg(not(feature = "guest_debug"))]
         let stop_on_boot = false;
 
+        let stage_start = Instant::now();
         let device_manager = DeviceManager::new(
             hypervisor.hypervisor_type(),
             vm.clone(),
@@ -572,7 +580,9 @@ impl Vm {
             sandbox_id,
         )
         .map_err(Error::DeviceManager)?;
+        let device_manager_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let memory = memory_manager.lock().unwrap().guest_memory();
         #[cfg(target_arch = "x86_64")]
         let io_bus = Arc::clone(device_manager.lock().unwrap().io_bus());
@@ -589,7 +599,9 @@ impl Vm {
             #[cfg(target_arch = "x86_64")]
             pci_config_io,
         });
+        let vm_ops_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let exit_evt_clone = exit_evt.try_clone().map_err(Error::EventFdClone)?;
         let cpus_config = { &config.lock().unwrap().cpus.clone() };
         let cpu_manager = cpu::CpuManager::new(
@@ -610,9 +622,11 @@ impl Vm {
             vcpu_started,
         )
         .map_err(Error::CpuManager)?;
+        let cpu_manager_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         let on_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } != 0;
 
+        let stage_start = Instant::now();
         #[cfg(feature = "tdx")]
         let kernel = config
             .lock()
@@ -633,6 +647,20 @@ impl Vm {
             .unwrap_or_default()
             .transpose()
             .map_err(Error::InitramfsFile)?;
+        let payload_file_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=vm_new_from_memory_manager total_ms={:.3} restoring={} validate_ms={:.3} load_payload_ms={:.3} numa_ms={:.3} device_manager_ms={:.3} vm_ops_ms={:.3} cpu_manager_ms={:.3} payload_file_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            restoring,
+            validate_ms,
+            load_payload_ms,
+            numa_ms,
+            device_manager_ms,
+            vm_ops_ms,
+            cpu_manager_ms,
+            payload_file_ms
+        );
 
         Ok(Vm {
             #[cfg(feature = "tdx")]
@@ -835,12 +863,16 @@ impl Vm {
     ) -> Result<Self> {
         let timestamp = Instant::now();
 
+        let timing_start = Instant::now();
+        let stage_start = Instant::now();
         let vm = Self::create_hypervisor_vm(
             &hypervisor,
             #[cfg(feature = "tdx")]
             false,
         )?;
+        let create_hypervisor_vm_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let memory_manager = if let Some(memory_manager_snapshot) =
             snapshot.snapshots.get(MEMORY_MANAGER_SNAPSHOT_ID)
         {
@@ -862,8 +894,10 @@ impl Vm {
                 "Missing memory manager snapshot"
             ))));
         };
+        let memory_manager_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
-        Vm::new_from_memory_manager(
+        let stage_start = Instant::now();
+        let new_vm = Vm::new_from_memory_manager(
             vm_config,
             memory_manager,
             vm,
@@ -879,7 +913,18 @@ impl Vm {
             Some(snapshot),
             sandbox_id,
             vcpu_started,
-        )
+        )?;
+        let new_from_memory_manager_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=vm_new_from_snapshot total_ms={:.3} create_hypervisor_vm_ms={:.3} memory_manager_ms={:.3} new_from_memory_manager_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            create_hypervisor_vm_ms,
+            memory_manager_ms,
+            new_from_memory_manager_ms
+        );
+
+        Ok(new_vm)
     }
 
     pub fn create_hypervisor_vm(
@@ -2287,14 +2332,19 @@ impl Vm {
         &self,
         vm_snapshot: &Snapshot,
     ) -> std::result::Result<(), MigratableError> {
+        let timing_start = Instant::now();
+
+        let stage_start = Instant::now();
         let saved_vcpu_states = self.cpu_manager.lock().unwrap().get_saved_states();
         // The number of vCPUs is the same as the number of saved vCPU states.
         let vcpu_numbers = saved_vcpu_states.len();
+        let get_saved_vcpu_states_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Creating a GIC device here, as the GIC will not be created when
         // restoring the device manager. Note that currently only the bare GICv3
         // without ITS is supported.
         let vcpu_count = vcpu_numbers.try_into().unwrap();
+        let stage_start = Instant::now();
         self.device_manager
             .lock()
             .unwrap()
@@ -2304,15 +2354,19 @@ impl Vm {
             .unwrap()
             .create_vgic(&self.vm, Gic::create_default_config(vcpu_count))
             .map_err(|e| MigratableError::Restore(anyhow!("Could not create GIC: {:#?}", e)))?;
+        let create_vgic_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // PMU interrupt sticks to PPI, so need to be added by 16 to get real irq number.
+        let stage_start = Instant::now();
         self.cpu_manager
             .lock()
             .unwrap()
             .init_pmu(arch::aarch64::fdt::AARCH64_PMU_IRQ + 16)
             .map_err(|e| MigratableError::Restore(anyhow!("Error init PMU: {:?}", e)))?;
+        let init_pmu_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Here we prepare the GICR_TYPER registers from the restored vCPU states.
+        let stage_start = Instant::now();
         self.device_manager
             .lock()
             .unwrap()
@@ -2321,8 +2375,10 @@ impl Vm {
             .lock()
             .unwrap()
             .set_gicr_typers(&saved_vcpu_states);
+        let set_gicr_typers_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Restore GIC states.
+        let stage_start = Instant::now();
         if let Some(gicv3_its_snapshot) = vm_snapshot.snapshots.get(GIC_V3_ITS_SNAPSHOT_ID) {
             self.device_manager
                 .lock()
@@ -2337,8 +2393,10 @@ impl Vm {
                 "Missing GicV3Its snapshot"
             )));
         }
+        let restore_gic_state_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Activate gic device
+        let stage_start = Instant::now();
         self.device_manager
             .lock()
             .unwrap()
@@ -2353,6 +2411,19 @@ impl Vm {
                     e
                 ))
             })?;
+        let enable_interrupt_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=vgic_restore_detail total_ms={:.3} vcpu_count={} get_saved_vcpu_states_ms={:.3} create_vgic_ms={:.3} init_pmu_ms={:.3} set_gicr_typers_ms={:.3} restore_gic_state_ms={:.3} enable_interrupt_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            vcpu_count,
+            get_saved_vcpu_states_ms,
+            create_vgic_ms,
+            init_pmu_ms,
+            set_gicr_typers_ms,
+            restore_gic_state_ms,
+            enable_interrupt_ms
+        );
 
         Ok(())
     }
@@ -2733,7 +2804,9 @@ impl Snapshottable for Vm {
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
         event!("vm", "restoring");
+        let timing_start = Instant::now();
 
+        let stage_start = Instant::now();
         let current_state = self
             .get_state()
             .map_err(|e| MigratableError::Restore(anyhow!("Could not get VM state: {:#?}", e)))?;
@@ -2741,11 +2814,19 @@ impl Snapshottable for Vm {
         current_state.valid_transition(new_state).map_err(|e| {
             MigratableError::Restore(anyhow!("Could not restore VM state: {:#?}", e))
         })?;
+        let state_check_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        self.load_clock_from_snapshot(&snapshot)
-            .map_err(|e| MigratableError::Restore(anyhow!("Error restoring clock: {:?}", e)))?;
+        let load_clock_ms = {
+            let stage_start = Instant::now();
+            self.load_clock_from_snapshot(&snapshot)
+                .map_err(|e| MigratableError::Restore(anyhow!("Error restoring clock: {:?}", e)))?;
+            stage_start.elapsed().as_secs_f64() * 1000.0
+        };
+        #[cfg(not(all(feature = "kvm", target_arch = "x86_64")))]
+        let load_clock_ms = 0.0;
 
+        let stage_start = Instant::now();
         if let Some(device_manager_snapshot) = snapshot.snapshots.get(DEVICE_MANAGER_SNAPSHOT_ID) {
             self.device_manager
                 .lock()
@@ -2756,7 +2837,9 @@ impl Snapshottable for Vm {
                 "Missing device manager snapshot"
             )));
         }
+        let device_manager_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         if let Some(cpu_manager_snapshot) = snapshot.snapshots.get(CPU_MANAGER_SNAPSHOT_ID) {
             self.cpu_manager
                 .lock()
@@ -2767,10 +2850,18 @@ impl Snapshottable for Vm {
                 "Missing CPU manager snapshot"
             )));
         }
+        let cpu_manager_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         #[cfg(target_arch = "aarch64")]
-        self.restore_vgic_and_enable_interrupt(&snapshot)?;
+        let vgic_restore_ms = {
+            let stage_start = Instant::now();
+            self.restore_vgic_and_enable_interrupt(&snapshot)?;
+            stage_start.elapsed().as_secs_f64() * 1000.0
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let vgic_restore_ms = 0.0;
 
+        let stage_start = Instant::now();
         if let Some(device_manager_snapshot) = snapshot.snapshots.get(DEVICE_MANAGER_SNAPSHOT_ID) {
             self.device_manager
                 .lock()
@@ -2781,8 +2872,10 @@ impl Snapshottable for Vm {
                 "Missing device manager snapshot"
             )));
         }
+        let restore_devices_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Now we can start all vCPUs from here.
+        let stage_start = Instant::now();
         self.cpu_manager
             .lock()
             .unwrap()
@@ -2790,20 +2883,38 @@ impl Snapshottable for Vm {
             .map_err(|e| {
                 MigratableError::Restore(anyhow!("Cannot start restored vCPUs: {:#?}", e))
             })?;
+        let start_restored_vcpus_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         self.setup_signal_handler().map_err(|e| {
             MigratableError::Restore(anyhow!("Could not setup signal handler: {:#?}", e))
         })?;
         self.setup_tty()
             .map_err(|e| MigratableError::Restore(anyhow!("Could not setup tty: {:#?}", e)))?;
+        let setup_signal_tty_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let mut state = self
             .state
             .try_write()
             .map_err(|e| MigratableError::Restore(anyhow!("Could not set VM state: {:#?}", e)))?;
         *state = new_state;
+        let state_set_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         info!("vm has been restored");
+        info!(
+            "restore timing stage=vm_restore total_ms={:.3} state_check_ms={:.3} load_clock_ms={:.3} device_manager_restore_ms={:.3} cpu_manager_restore_ms={:.3} vgic_restore_ms={:.3} restore_devices_ms={:.3} start_restored_vcpus_ms={:.3} setup_signal_tty_ms={:.3} state_set_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            state_check_ms,
+            load_clock_ms,
+            device_manager_restore_ms,
+            cpu_manager_restore_ms,
+            vgic_restore_ms,
+            restore_devices_ms,
+            start_restored_vcpus_ms,
+            setup_signal_tty_ms,
+            state_set_ms
+        );
         event!("vm", "restored");
         Ok(())
     }

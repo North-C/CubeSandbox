@@ -4429,6 +4429,7 @@ impl DeviceManager {
         device_groups: (Vec<DeviceNode>, Vec<DeviceNode>),
         snapshot: Snapshot,
     ) -> std::result::Result<(), MigratableError> {
+        let timing_start = Instant::now();
         let total_nodes = device_groups.0.len() + device_groups.1.len();
         let work_thread_num = if total_nodes > MAX_WORKER_THREADS {
             MAX_WORKER_THREADS
@@ -4436,26 +4437,49 @@ impl DeviceManager {
             total_nodes
         };
 
+        let stage_start = Instant::now();
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(work_thread_num)
             .enable_all()
             .build()
             .unwrap();
+        let runtime_build_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
-        rt.block_on(async move {
+        let block_on_start = Instant::now();
+        let result = rt.block_on(async move {
             // Process device groups in order to ensure correct restoration sequence
             let groups = [device_groups.0, device_groups.1];
-            for nodes in groups {
+            for (group_idx, nodes) in groups.into_iter().enumerate() {
+                let group_start = Instant::now();
                 let mut thread_pool: Vec<JoinHandle<Result<(), MigratableError>>> = vec![];
+                let node_count = nodes.len();
+                let mut migratable_count = 0usize;
 
                 for node in nodes {
                     if let Some(migratable) = node.migratable {
+                        migratable_count += 1;
                         debug!("Restoring {} from DeviceManager", node.id);
                         if let Some(snapshot) = snapshot.snapshots.get(&node.id).cloned() {
+                            let device_id = node.id.clone();
                             thread_pool.push(tokio::spawn(async move {
+                                let device_start = Instant::now();
                                 let mut guard = migratable.lock().unwrap();
+                                let lock_ms = device_start.elapsed().as_secs_f64() * 1000.0;
+                                let stage_start = Instant::now();
                                 guard.pause()?;
+                                let pause_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+                                let stage_start = Instant::now();
                                 guard.restore(*snapshot)?;
+                                let restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+                                info!(
+                                    "restore timing stage=device_restore_node id={} group={} total_ms={:.3} lock_ms={:.3} pause_ms={:.3} restore_ms={:.3}",
+                                    device_id,
+                                    group_idx,
+                                    device_start.elapsed().as_secs_f64() * 1000.0,
+                                    lock_ms,
+                                    pause_ms,
+                                    restore_ms
+                                );
                                 Ok(())
                             }));
                         } else {
@@ -4471,19 +4495,41 @@ impl DeviceManager {
                 for t in thread_pool {
                     t.await.unwrap()?;
                 }
+                info!(
+                    "restore timing stage=device_restore_group group={} total_ms={:.3} node_count={} migratable_count={}",
+                    group_idx,
+                    group_start.elapsed().as_secs_f64() * 1000.0,
+                    node_count,
+                    migratable_count
+                );
             }
             Ok(())
-        })
+        });
+        let block_on_ms = block_on_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=device_restore_node_total total_ms={:.3} total_nodes={} worker_threads={} runtime_build_ms={:.3} block_on_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            total_nodes,
+            work_thread_num,
+            runtime_build_ms,
+            block_on_ms
+        );
+
+        result
     }
 
     pub fn restore_devices(
         &mut self,
         snapshot: Snapshot,
     ) -> std::result::Result<(), MigratableError> {
+        let timing_start = Instant::now();
+
         // Finally, restore all devices associated with the DeviceManager.
         // It's important to restore devices in the right order, that's why
         // the device tree is the right way to ensure we restore a child before
         // its parent node.
+        let stage_start = Instant::now();
         let devices_children: Vec<_> = self
             .device_tree
             .lock()
@@ -4492,7 +4538,9 @@ impl DeviceManager {
             .rev()
             .cloned()
             .collect();
+        let children_collect_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let devices_parent: Vec<_> = self
             .device_tree
             .lock()
@@ -4501,13 +4549,31 @@ impl DeviceManager {
             .rev()
             .cloned()
             .collect();
+        let parent_collect_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let children_count = devices_children.len();
+        let parent_count = devices_parent.len();
         let device_groups = (devices_children, devices_parent);
+        let stage_start = Instant::now();
         self.restore_device_node(device_groups, snapshot)?;
+        let restore_device_node_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // The devices have been fully restored, we can now update the
         // restoring state of the DeviceManager.
+        let stage_start = Instant::now();
         self.restoring = false;
+        let restoring_state_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=device_manager_restore_devices total_ms={:.3} children_count={} parent_count={} children_collect_ms={:.3} parent_collect_ms={:.3} restore_device_node_ms={:.3} restoring_state_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            children_count,
+            parent_count,
+            children_collect_ms,
+            parent_collect_ms,
+            restore_device_node_ms,
+            restoring_state_ms
+        );
 
         Ok(())
     }

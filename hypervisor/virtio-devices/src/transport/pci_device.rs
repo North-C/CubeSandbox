@@ -29,6 +29,7 @@ use std::ops::Deref;
 use std::result;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Instant;
 use virtio_queue::{Error as QueueError, Queue, QueueT};
 use vm_allocator::{AddressAllocator, SystemAllocator};
 use vm_device::dma_mapping::ExternalDmaMapping;
@@ -305,18 +306,35 @@ pub struct VirtioPciDeviceActivator {
 
 impl VirtioPciDeviceActivator {
     pub fn activate(&mut self) -> ActivateResult {
+        let timing_start = Instant::now();
+        let stage_start = Instant::now();
         self.device.lock().unwrap().activate(
             self.memory.take().unwrap(),
             self.interrupt.take().unwrap(),
             self.queues.take().unwrap(),
         )?;
-        self.device_activated.store(true, Ordering::SeqCst);
+        let device_activate_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
+        self.device_activated.store(true, Ordering::SeqCst);
+        let store_activated_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        let stage_start = Instant::now();
         if let Some(barrier) = self.barrier.take() {
             info!("{}: Waiting for barrier", self.id);
             barrier.wait();
             info!("{}: Barrier released", self.id);
         }
+        let barrier_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        log::info!(
+            "restore timing stage=virtio_pci_activate id={} total_ms={:.3} device_activate_ms={:.3} store_activated_ms={:.3} barrier_ms={:.3}",
+            self.id,
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            device_activate_ms,
+            store_activated_ms,
+            barrier_ms
+        );
 
         Ok(())
     }
@@ -1199,10 +1217,13 @@ impl Snapshottable for VirtioPciDevice {
     }
 
     fn restore(&mut self, snapshot: Snapshot) -> std::result::Result<(), MigratableError> {
+        let timing_start = Instant::now();
+
         if let Some(virtio_pci_dev_section) =
             snapshot.snapshot_data.get(&format!("{}-section", self.id))
         {
             // Restore MSI-X
+            let stage_start = Instant::now();
             if let Some(msix_config) = &self.msix_config {
                 let id = msix_config.lock().unwrap().id();
                 if let Some(msix_snapshot) = snapshot.snapshots.get(&id) {
@@ -1212,19 +1233,25 @@ impl Snapshottable for VirtioPciDevice {
                         .restore(*msix_snapshot.clone())?;
                 }
             }
+            let msix_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
             // Restore VirtioPciCommonConfig
+            let stage_start = Instant::now();
             if let Some(virtio_config_snapshot) = snapshot.snapshots.get(&self.common_config.id()) {
                 self.common_config
                     .restore(*virtio_config_snapshot.clone())?;
             }
+            let common_config_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
             // Restore PciConfiguration
+            let stage_start = Instant::now();
             if let Some(pci_config_snapshot) = snapshot.snapshots.get(&self.configuration.id()) {
                 self.configuration.restore(*pci_config_snapshot.clone())?;
             }
+            let pci_config_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
             // First restore the status of the virtqueues.
+            let stage_start = Instant::now();
             self.set_state(&virtio_pci_dev_section.to_state()?)
                 .map_err(|e| {
                     MigratableError::Restore(anyhow!(
@@ -1232,15 +1259,29 @@ impl Snapshottable for VirtioPciDevice {
                         e
                     ))
                 })?;
+            let set_state_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
             // Then we can activate the device, as we know at this point that
             // the virtqueues are in the right state and the device is ready
             // to be activated, which will spawn each virtio worker thread.
+            let stage_start = Instant::now();
             if self.device_activated.load(Ordering::SeqCst) && self.is_driver_ready() {
                 self.activate().map_err(|e| {
                     MigratableError::Restore(anyhow!("Failed activating the device: {:?}", e))
                 })?;
             }
+            let activate_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+            log::info!(
+                "restore timing stage=virtio_pci_restore_detail id={} total_ms={:.3} msix_restore_ms={:.3} common_config_restore_ms={:.3} pci_config_restore_ms={:.3} set_state_ms={:.3} activate_ms={:.3}",
+                self.id,
+                timing_start.elapsed().as_secs_f64() * 1000.0,
+                msix_restore_ms,
+                common_config_restore_ms,
+                pci_config_restore_ms,
+                set_state_ms,
+                activate_ms
+            );
 
             return Ok(());
         }

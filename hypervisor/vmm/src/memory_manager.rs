@@ -37,6 +37,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
 use std::path::PathBuf;
 use std::result;
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Instant;
 use tracer::trace_scoped;
 use virtio_devices::BlocksState;
 #[cfg(target_arch = "x86_64")]
@@ -910,7 +911,9 @@ impl MemoryManager {
         #[cfg(target_arch = "x86_64")] sgx_epc_config: Option<Vec<SgxEpcConfig>>,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
         trace_scoped!("MemoryManager::new");
+        let timing_start = Instant::now();
 
+        let stage_start = Instant::now();
         let user_provided_zones = config.size == 0;
 
         let mmio_address_space_size = mmio_address_space_size(phys_bits);
@@ -924,7 +927,9 @@ impl MemoryManager {
 
         let (ram_size, zones, allow_mem_hotplug) =
             Self::validate_memory_config(config, user_provided_zones)?;
+        let validate_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let (
             start_of_device_area,
             boot_ram,
@@ -1078,7 +1083,9 @@ impl MemoryManager {
                 0,
             )
         };
+        let region_setup_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let guest_memory = GuestMemoryAtomic::new(guest_memory);
 
         // Both MMIO and PIO address spaces start at address 0.
@@ -1124,7 +1131,9 @@ impl MemoryManager {
         } else {
             None
         };
+        let allocator_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         // If running on SGX the start of device area and RAM area may diverge but
         // at this point they are next to each other.
         let end_of_ram_area = start_of_device_area.unchecked_sub(1);
@@ -1166,18 +1175,49 @@ impl MemoryManager {
             uefi_flash: None,
             thp: config.thp,
         };
+        let struct_init_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         memory_manager.allocate_address_space()?;
+        let allocate_address_space_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         #[cfg(target_arch = "aarch64")]
-        memory_manager.add_uefi_flash()?;
+        let add_uefi_flash_ms = {
+            let stage_start = Instant::now();
+            memory_manager.add_uefi_flash()?;
+            stage_start.elapsed().as_secs_f64() * 1000.0
+        };
+        #[cfg(not(target_arch = "aarch64"))]
+        let add_uefi_flash_ms = 0.0;
 
         #[cfg(target_arch = "x86_64")]
-        if let Some(sgx_epc_config) = sgx_epc_config {
-            memory_manager.setup_sgx(sgx_epc_config)?;
-        }
+        let setup_sgx_ms = {
+            let stage_start = Instant::now();
+            if let Some(sgx_epc_config) = sgx_epc_config {
+                memory_manager.setup_sgx(sgx_epc_config)?;
+            }
+            stage_start.elapsed().as_secs_f64() * 1000.0
+        };
+        #[cfg(not(target_arch = "x86_64"))]
+        let setup_sgx_ms = 0.0;
 
+        let stage_start = Instant::now();
         memory_manager.init_dirty_log().map_err(Error::Dirtylog)?;
+        let init_dirty_log_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        info!(
+            "restore timing stage=memory_manager_new total_ms={:.3} restore_data={} validate_ms={:.3} region_setup_ms={:.3} allocator_ms={:.3} struct_init_ms={:.3} allocate_address_space_ms={:.3} add_uefi_flash_ms={:.3} setup_sgx_ms={:.3} init_dirty_log_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            restore_data.is_some(),
+            validate_ms,
+            region_setup_ms,
+            allocator_ms,
+            struct_init_ms,
+            allocate_address_space_ms,
+            add_uefi_flash_ms,
+            setup_sgx_ms,
+            init_dirty_log_ms
+        );
 
         Ok(Arc::new(Mutex::new(memory_manager)))
     }
@@ -1190,11 +1230,14 @@ impl MemoryManager {
         prefault: bool,
         phys_bits: u8,
     ) -> Result<Arc<Mutex<MemoryManager>>, Error> {
+        let timing_start = Instant::now();
+
         if let Some(source_url) = source_url {
             let mut memory_file_path = url_to_path(source_url).map_err(Error::Restore)?;
             memory_file_path.push(String::from(SNAPSHOT_FILENAME));
 
             let fast_restore = Self::support_fast_restore_check(config);
+            let stage_start = Instant::now();
             let memory_file = if fast_restore {
                 info!("restore non-shared map, speed up restore by share map memory file");
                 Some(
@@ -1206,11 +1249,15 @@ impl MemoryManager {
             } else {
                 None
             };
+            let open_memory_file_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+            let stage_start = Instant::now();
             let mem_snapshot: MemoryManagerSnapshotData = snapshot
                 .to_state(MEMORY_MANAGER_SNAPSHOT_ID)
                 .map_err(Error::Restore)?;
+            let snapshot_to_state_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+            let stage_start = Instant::now();
             let mm = MemoryManager::new(
                 vm,
                 config,
@@ -1224,13 +1271,27 @@ impl MemoryManager {
                 #[cfg(target_arch = "x86_64")]
                 None,
             )?;
+            let memory_manager_new_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+            let stage_start = Instant::now();
             if !fast_restore {
                 info!("restore shared map, fall back to slow restore");
                 mm.lock()
                     .unwrap()
                     .fill_saved_regions(memory_file_path, mem_snapshot.memory_ranges)?;
             }
+            let fill_saved_regions_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+            info!(
+                "restore timing stage=memory_manager_new_from_snapshot total_ms={:.3} fast_restore={} prefault={} open_memory_file_ms={:.3} snapshot_to_state_ms={:.3} memory_manager_new_ms={:.3} fill_saved_regions_ms={:.3}",
+                timing_start.elapsed().as_secs_f64() * 1000.0,
+                fast_restore,
+                prefault,
+                open_memory_file_ms,
+                snapshot_to_state_ms,
+                memory_manager_new_ms,
+                fill_saved_regions_ms
+            );
 
             Ok(mm)
         } else {

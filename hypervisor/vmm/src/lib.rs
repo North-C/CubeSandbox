@@ -645,6 +645,8 @@ impl Vmm {
     }
 
     fn vm_restore(&mut self, restore_cfg: RestoreConfig) -> result::Result<(), VmError> {
+        let timing_start = Instant::now();
+
         if self.vm.is_some() || self.vm_config.is_some() {
             return Err(VmError::VmAlreadyCreated);
         }
@@ -655,6 +657,8 @@ impl Vmm {
         }
         // Safe to unwrap as we checked it was Some(&str).
         let source_url = source_url.unwrap();
+
+        let stage_start = Instant::now();
         let vm_config = Arc::new(Mutex::new({
             let mut vm_config = recv_vm_config(source_url).map_err(VmError::Restore)?;
             if let Some(disks) = &restore_cfg.disks {
@@ -676,17 +680,26 @@ impl Vmm {
 
             vm_config
         }));
+        let config_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         info!("config {:?}", vm_config);
 
+        let stage_start = Instant::now();
         let snapshot = recv_vm_state(source_url).map_err(VmError::Restore)?;
-        #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
+        let snapshot_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
-        self.vm_check_cpuid_compatibility(&vm_config, &vm_snapshot.common_cpuid)
-            .map_err(VmError::Restore)?;
+        let cpuid_check_ms = {
+            let stage_start = Instant::now();
+            let vm_snapshot = get_vm_snapshot(&snapshot).map_err(VmError::Restore)?;
+            self.vm_check_cpuid_compatibility(&vm_config, &vm_snapshot.common_cpuid)
+                .map_err(VmError::Restore)?;
+            stage_start.elapsed().as_secs_f64() * 1000.0
+        };
+        #[cfg(not(all(feature = "kvm", target_arch = "x86_64")))]
+        let cpuid_check_ms = 0.0;
 
+        let stage_start = Instant::now();
         let exit_evt = self.exit_evt.try_clone().map_err(VmError::EventFdClone)?;
         let reset_evt = self.reset_evt.try_clone().map_err(VmError::EventFdClone)?;
         #[cfg(feature = "guest_debug")]
@@ -698,7 +711,9 @@ impl Vmm {
             .activate_evt
             .try_clone()
             .map_err(VmError::EventFdClone)?;
+        let eventfd_clone_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
+        let stage_start = Instant::now();
         let mut vm = Vm::new_from_snapshot(
             &snapshot,
             vm_config.clone(),
@@ -714,13 +729,31 @@ impl Vmm {
             self.sandbox_id.clone(),
             self.vcpu_started.clone(),
         )?;
+        let new_from_snapshot_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Now we can restore the rest of the VM.
+        let stage_start = Instant::now();
         vm.restore(snapshot).map_err(VmError::Restore)?;
+        let vm_restore_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        let stage_start = Instant::now();
         vm.resume().map_err(VmError::Resume)?;
+        let vm_resume_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         self.vm_config = Some(vm_config.clone());
         self.vm = Some(vm);
+
+        info!(
+            "restore timing stage=vmm_vm_restore total_ms={:.3} config_ms={:.3} snapshot_ms={:.3} cpuid_check_ms={:.3} eventfd_clone_ms={:.3} new_from_snapshot_ms={:.3} vm_restore_ms={:.3} vm_resume_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            config_ms,
+            snapshot_ms,
+            cpuid_check_ms,
+            eventfd_clone_ms,
+            new_from_snapshot_ms,
+            vm_restore_ms,
+            vm_resume_ms
+        );
 
         Ok(())
     }
