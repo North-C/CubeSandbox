@@ -1153,3 +1153,72 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 本地 worker=10 临时代码已撤回，仅保留本段验证记录。
+
+## ARM64 IRQ routing 进程间文件锁限流负向验证
+
+尝试优化：
+
+- 仅在 ARM64 下，为 `register_irqfd` / `unregister_irqfd` / `set_gsi_routing` 增加进程间文件锁限流。
+- 初始限流槽数为 `8`，锁文件路径形如 `/tmp/cubesandbox-kvm-irq-routing-<slot>.lock`。
+- 目标是将 c100 下跨 shim 进程的 KVM IRQ routing ioctl 风暴压到有限并发，验证是否能降低 `register_irqfd_ms` / `set_gsi_routes_ms` 的尾延迟。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。该实验代码在 x86 下为 no-op。
+
+远端 ARM64 构建与部署：
+
+- 第一次构建误复用了远端源码中残留的 `MAX_RESTORE_WORKER_THREADS=10`，因此 `irq-lock8-c100-n200` 是 `worker=10 + lock8` 混合数据，不作为纯限流结论。
+- 随后重新同步本地稳定 `device_manager.rs`，确认远端源码仅保留 `MAX_WORKER_THREADS=5`。
+- 纯 `lock8 + worker=5` 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 纯实验构建耗时：`4m04s`
+- 纯实验 shim sha256：`159e074cb5dd681b989286158a9fc3146351d747ac8389a925c3bc709a3812b8`
+- 纯实验 cube-runtime sha256：`5963771c898124924071262238e215f2bacb0339068e503788c5f092eeebb1e8`
+- 回滚备份：`202606031708_pure_irqlock8`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py pure-irq-lock8-smoke-c1-n1 1 1
+./run_create_only_case.py pure-irq-lock8-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p90 | create p95 | create p99 | 总耗时 | 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `32.7ms` | `32.7ms` | `32.7ms` | `32.7ms` | `32.7ms` | `0.0328s` | 清理 `1/1` |
+| c100 n200 | `100%` | `536.8ms` | `538.2ms` | `1042.7ms` | `1079.3ms` | `1171.1ms` | `1.2497s` | 清理 `200/200` |
+
+对比稳定基线：
+
+- 稳定基线 c100 n200：成功率 `100%`，avg 约 `489.1ms`，p50 约 `558.5ms`，p95 约 `762.4ms`，p99 约 `805.4ms`，总耗时约 `1.203s`。
+- 纯 `lock8` 后：成功率仍为 `100%`，但 p95 上升到约 `1079ms`，p99 上升到约 `1171ms`，总耗时也从约 `1.203s` 上升到约 `1.250s`。
+
+日志观察：
+
+- 纯实验日志确认 `device_restore_node_total.worker_threads=5`。
+- 大量 `interrupt_group_update_many` 中，`irq_routing_lock_wait_ms` 几乎等于 `register_irqfd_ms` 的大部分耗时。
+- 典型尾部样本：
+  - `total_ms=777.867ms`，`register_irqfd_ms=772.602ms`，`irq_routing_lock_wait_ms=771.334ms`。
+  - `total_ms=647.613ms`，`register_irqfd_ms=609.257ms`，`irq_routing_lock_wait_ms=603.025ms`。
+  - `total_ms=593.566ms`，`register_irqfd_ms=592.747ms`，`irq_routing_lock_wait_ms=591.459ms`。
+- 这说明文件锁把原先内核 ioctl 排队显式转移成用户态锁等待，但没有降低端到端尾延迟。
+
+判断：
+
+- 该优化不保留。
+- 粗粒度进程间文件锁限流会牺牲 p95/p99，无法改善 create-only 端到端性能。
+- 后续不应继续在用户态对所有 IRQ routing ioctl 做统一限流；更合理的方向是减少 MSI-X route/irqfd 注册数量，或者在设备/队列层面避免不必要的恢复期注册。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 IRQ routing 文件锁限流实验代码已撤回，仅保留本段验证记录。
