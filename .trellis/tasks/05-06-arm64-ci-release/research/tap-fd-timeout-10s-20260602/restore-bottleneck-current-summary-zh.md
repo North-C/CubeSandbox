@@ -966,3 +966,64 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 回滚 smoke：create p99 `32.1ms`，成功率 `100%`，清理 `1/1`。
 - 本地 deferred route flush 代码已撤回，仅保留本段验证记录。
+
+## restore device worker 降到 2 负向验证
+
+尝试优化：
+
+- 保持 snapshot 等其他路径的 `MAX_WORKER_THREADS=5` 不变。
+- 仅在 `DeviceManager::restore_device_node()` 引入临时 `MAX_RESTORE_WORKER_THREADS=2`。
+- 目标是降低单 VM 内 `_virtio-pci-*` 设备 restore 的并发度，观察是否能减少 c100 下 `register_irqfd` / `set_gsi_routing` / VGIC ioctl 的全局排队。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 构建耗时：`4m02s`
+- 临时部署 shim sha256：`3993409f02e87013a0988930e76a630fdc25b0d21ce0aa6a43d73d74bbc096ad`
+- 临时部署 cube-runtime sha256：`cdc0d2b43a14b1e07ecae325f0f1db8926dcae9c6b47c8c55d06fd252a94b510`
+- 回滚备份：`20260603160216`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py restore-worker2-smoke-c1-n1 1 1
+./run_create_only_case.py restore-worker2-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p95 | create p99 | 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `33.2ms` | `33.2ms` | `33.2ms` | `33.2ms` | 清理 `1/1` |
+| c100 n200 | `99.5%` | `482.488ms` | `533.546ms` | `871.365ms` | `953.000ms` | 1 个 `130459` 初始化失败 |
+
+日志观察：
+
+- `device_restore_node_total.worker_threads=2` 已确认生效。
+- 部分样本 `restore_devices_ms` 仍在 `390-466ms`，单 VM 内设备 restore 串行化增加了单 VM 的 restore wall time。
+- `interrupt_group_update_many.register_irqfd_ms` 仍可出现 `140ms`、`171ms`、`182ms` 等长尾。
+- `set_gsi_routes_ms` 仍可出现 `80ms`、`90ms`、`129ms` 等长尾。
+- `vgic_restore_detail.enable_interrupt_ms` 仍在 `150-196ms` 区间。
+
+判断：
+
+- 该优化不保留。
+- 将每个 VM 内 restore worker 从 5 降到 2 没有消除全局 ioctl 排队，反而增加了单 VM 内设备 restore 的串行时间。
+- c100 成功率从稳定版本 `100%` 下降到 `99.5%`，p99 从稳定版本约 `805ms` 上升到约 `953ms`。
+- 后续不应继续粗粒度降低每 VM restore worker；如果要做限流，应改为更有针对性的 ioctl/irqfd 注册限流或全局并发闸门，而不是压低所有设备 restore 并发。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 worker=2 临时代码已撤回，仅保留本段验证记录。
