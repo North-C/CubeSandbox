@@ -39,7 +39,7 @@ func DefaultConfig() Config {
 	return Config{
 		EthName:         "",
 		ObjectDir:       defaultObjectDir,
-		CIDR:            "192.168.0.0/18",
+		CIDR:            "172.31.64.0/18",
 		MVMInnerIP:      "169.254.68.6",
 		MVMMacAddr:      "20:90:6f:fc:fc:fc",
 		MvmGwDestIP:     "169.254.68.5",

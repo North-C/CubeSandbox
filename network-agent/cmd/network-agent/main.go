@@ -32,7 +32,7 @@ func main() {
 		grpcListen     = flag.String("grpc-listen", "unix:///tmp/cube/network-agent-grpc.sock", "optional gRPC listen endpoint, supports unix:// and tcp://")
 		cubeletConfig  = flag.String("cubelet-config", "", "optional Cubelet config.toml path used to sync network defaults")
 		ethName        = flag.String("eth-name", "", "node uplink interface name")
-		cidr           = flag.String("cidr", "192.168.0.0/18", "tap sandbox cidr")
+		cidr           = flag.String("cidr", "172.31.64.0/18", "tap sandbox cidr")
 		mvmInnerIP     = flag.String("mvm-inner-ip", "169.254.68.6", "guest visible IP inside MVM")
 		mvmMacAddr     = flag.String("mvm-mac-addr", "20:90:6f:fc:fc:fc", "guest MAC address")
 		mvmGwDestIP    = flag.String("mvm-gw-dest-ip", "169.254.68.5", "guest gateway destination IP")
