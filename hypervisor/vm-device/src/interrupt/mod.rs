@@ -123,6 +123,12 @@ pub trait InterruptSourceGroup: Send + Sync {
         Ok(())
     }
 
+    /// Enable a subset of interrupt sources in the group.
+    #[allow(unused_variables)]
+    fn enable_selected(&self, indexes: &[InterruptIndex]) -> Result<()> {
+        self.enable()
+    }
+
     /// Disable the interrupt sources in the group to generate interrupts.
     fn disable(&self) -> Result<()> {
         // Not all interrupt sources can be disabled.
@@ -153,4 +159,15 @@ pub trait InterruptSourceGroup: Send + Sync {
         config: InterruptSourceConfig,
         masked: bool,
     ) -> Result<()>;
+
+    /// Update multiple interrupt source configurations.
+    ///
+    /// Implementations can override this to batch expensive backend routing
+    /// updates. The default keeps existing per-source semantics.
+    fn update_many(&self, configs: &[(InterruptIndex, InterruptSourceConfig, bool)]) -> Result<()> {
+        for (index, config, masked) in configs {
+            self.update(*index, *config, *masked)?;
+        }
+        Ok(())
+    }
 }

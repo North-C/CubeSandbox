@@ -10,8 +10,10 @@ use hypervisor::{
     arch::aarch64::gic::{Vgic, VgicConfig},
     CpuState,
 };
+use std::collections::HashSet;
 use std::result;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup,
     LegacyIrqSourceConfig, MsiIrqGroupConfig,
@@ -33,6 +35,7 @@ pub const IRQ_LEGACY_COUNT: usize = 32;
 // service.
 pub struct Gic {
     interrupt_source_group: Arc<dyn InterruptSourceGroup>,
+    legacy_irqs: Mutex<HashSet<InterruptIndex>>,
     // The hypervisor agnostic virtual GIC
     vgic: Option<Arc<Mutex<dyn Vgic>>>,
 }
@@ -51,6 +54,7 @@ impl Gic {
 
         Ok(Gic {
             interrupt_source_group,
+            legacy_irqs: Mutex::new(HashSet::new()),
             vgic: None,
         })
     }
@@ -88,28 +92,58 @@ impl Gic {
 }
 
 impl InterruptController for Gic {
+    fn register_legacy_irq(&mut self, irq: usize) -> Result<()> {
+        self.legacy_irqs
+            .lock()
+            .unwrap()
+            .insert(irq as InterruptIndex);
+        Ok(())
+    }
+
     fn enable(&self) -> Result<()> {
+        let timing_start = Instant::now();
+        let mut irqs: Vec<InterruptIndex> =
+            self.legacy_irqs.lock().unwrap().iter().copied().collect();
+        irqs.sort_unstable();
+
         // Set irqfd for legacy interrupts
-        self.interrupt_source_group
-            .enable()
-            .map_err(Error::EnableInterrupt)?;
+        let stage_start = Instant::now();
+        if !irqs.is_empty() {
+            self.interrupt_source_group
+                .enable_selected(&irqs)
+                .map_err(Error::EnableInterrupt)?;
+        }
+        let legacy_enable_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
 
         // Set irq_routing for legacy interrupts.
         //   irqchip: Hardcode to 0 as we support only 1 GIC
         //   pin: Use irq number as pin
-        for i in IRQ_LEGACY_BASE..(IRQ_LEGACY_BASE + IRQ_LEGACY_COUNT) {
-            let config = LegacyIrqSourceConfig {
-                irqchip: 0,
-                pin: (i - IRQ_LEGACY_BASE) as u32,
-            };
+        let stage_start = Instant::now();
+        let configs: Vec<_> = irqs
+            .iter()
+            .map(|i| {
+                let config = LegacyIrqSourceConfig {
+                    irqchip: 0,
+                    pin: (*i as usize - IRQ_LEGACY_BASE) as u32,
+                };
+                (*i, InterruptSourceConfig::LegacyIrq(config), false)
+            })
+            .collect();
+        if !configs.is_empty() {
             self.interrupt_source_group
-                .update(
-                    i as InterruptIndex,
-                    InterruptSourceConfig::LegacyIrq(config),
-                    false,
-                )
+                .update_many(&configs)
                 .map_err(Error::EnableInterrupt)?;
         }
+        let legacy_route_update_ms = stage_start.elapsed().as_secs_f64() * 1000.0;
+
+        log::info!(
+            "restore timing stage=gic_enable_detail total_ms={:.3} legacy_irq_count={} legacy_enable_ms={:.3} legacy_route_update_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            irqs.len(),
+            legacy_enable_ms,
+            legacy_route_update_ms
+        );
+
         Ok(())
     }
 

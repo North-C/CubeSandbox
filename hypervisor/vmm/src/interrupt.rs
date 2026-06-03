@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use vm_allocator::SystemAllocator;
 use vm_device::interrupt::{
     InterruptIndex, InterruptManager, InterruptSourceConfig, InterruptSourceGroup,
@@ -39,7 +40,7 @@ impl InterruptRoute {
         })
     }
 
-    pub fn enable(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
+    pub fn enable(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<bool> {
         if !self.registered.load(Ordering::Acquire) {
             vm.register_irqfd(&self.irq_fd, self.gsi).map_err(|e| {
                 io::Error::new(
@@ -50,9 +51,11 @@ impl InterruptRoute {
 
             // Update internals to track the irq_fd as "registered".
             self.registered.store(true, Ordering::Release);
+
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     pub fn disable(&self, vm: &Arc<dyn hypervisor::Vm>) -> Result<()> {
@@ -131,8 +134,87 @@ impl MsiInterruptGroup {
 
 impl InterruptSourceGroup for MsiInterruptGroup {
     fn enable(&self) -> Result<()> {
+        let timing_start = Instant::now();
+        let mut route_count = 0;
+        let mut new_registered = 0;
+        let mut already_registered = 0;
+        let mut register_irqfd_ms = 0.0;
+        let mut max_route_ms = 0.0;
+
         for (_, route) in self.irq_routes.iter() {
-            route.enable(&self.vm)?;
+            route_count += 1;
+            let route_start = Instant::now();
+            let registered = route.enable(&self.vm)?;
+            let route_ms = route_start.elapsed().as_secs_f64() * 1000.0;
+            max_route_ms = f64::max(max_route_ms, route_ms);
+            if registered {
+                new_registered += 1;
+                register_irqfd_ms += route_ms;
+            } else {
+                already_registered += 1;
+            }
+        }
+
+        log::info!(
+            "restore timing stage=interrupt_group_enable total_ms={:.3} route_count={} new_registered={} already_registered={} register_irqfd_ms={:.3} max_route_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            route_count,
+            new_registered,
+            already_registered,
+            register_irqfd_ms,
+            max_route_ms
+        );
+
+        Ok(())
+    }
+
+    fn enable_selected(&self, indexes: &[InterruptIndex]) -> Result<()> {
+        let timing_start = Instant::now();
+        let mut route_count = 0;
+        let mut new_registered = 0;
+        let mut already_registered = 0;
+        let mut missing_routes = 0;
+        let mut register_irqfd_ms = 0.0;
+        let mut max_route_ms = 0.0;
+
+        for index in indexes {
+            if let Some(route) = self.irq_routes.get(index) {
+                route_count += 1;
+                let route_start = Instant::now();
+                let registered = route.enable(&self.vm)?;
+                let route_ms = route_start.elapsed().as_secs_f64() * 1000.0;
+                max_route_ms = f64::max(max_route_ms, route_ms);
+                if registered {
+                    new_registered += 1;
+                    register_irqfd_ms += route_ms;
+                } else {
+                    already_registered += 1;
+                }
+            } else {
+                missing_routes += 1;
+            }
+        }
+
+        log::info!(
+            "restore timing stage=interrupt_group_enable_selected total_ms={:.3} requested_count={} route_count={} new_registered={} already_registered={} missing_routes={} register_irqfd_ms={:.3} max_route_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            indexes.len(),
+            route_count,
+            new_registered,
+            already_registered,
+            missing_routes,
+            register_irqfd_ms,
+            max_route_ms
+        );
+
+        if missing_routes > 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!(
+                    "enable_selected: {} invalid interrupt indexes",
+                    missing_routes
+                ),
+            ));
         }
 
         Ok(())
@@ -179,7 +261,7 @@ impl InterruptSourceGroup for MsiInterruptGroup {
             if masked {
                 route.disable(&self.vm)?;
             } else {
-                route.enable(&self.vm)?;
+                let _ = route.enable(&self.vm)?;
             }
             let mut routes = self.gsi_msi_routes.lock().unwrap();
             routes.insert(route.gsi, entry);
@@ -190,6 +272,68 @@ impl InterruptSourceGroup for MsiInterruptGroup {
             io::ErrorKind::Other,
             format!("update: Invalid interrupt index {}", index),
         ))
+    }
+
+    fn update_many(&self, configs: &[(InterruptIndex, InterruptSourceConfig, bool)]) -> Result<()> {
+        let timing_start = Instant::now();
+        let mut new_registered = 0;
+        let mut already_registered = 0;
+        let mut disabled = 0;
+        let mut register_irqfd_ms = 0.0;
+        let mut max_route_ms = 0.0;
+        let mut updates = Vec::with_capacity(configs.len());
+
+        for (index, config, masked) in configs {
+            if let Some(route) = self.irq_routes.get(index) {
+                let entry = RoutingEntry {
+                    route: self.vm.make_routing_entry(route.gsi, config),
+                    masked: *masked,
+                };
+                if *masked {
+                    route.disable(&self.vm)?;
+                    disabled += 1;
+                } else {
+                    let route_start = Instant::now();
+                    let registered = route.enable(&self.vm)?;
+                    let route_ms = route_start.elapsed().as_secs_f64() * 1000.0;
+                    max_route_ms = f64::max(max_route_ms, route_ms);
+                    if registered {
+                        new_registered += 1;
+                        register_irqfd_ms += route_ms;
+                    } else {
+                        already_registered += 1;
+                    }
+                }
+                updates.push((route.gsi, entry));
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("update_many: Invalid interrupt index {}", index),
+                ));
+            }
+        }
+
+        let set_gsi_routes_start = Instant::now();
+        let mut routes = self.gsi_msi_routes.lock().unwrap();
+        for (gsi, entry) in updates {
+            routes.insert(gsi, entry);
+        }
+        self.set_gsi_routes(&routes)?;
+        let set_gsi_routes_ms = set_gsi_routes_start.elapsed().as_secs_f64() * 1000.0;
+
+        log::info!(
+            "restore timing stage=interrupt_group_update_many total_ms={:.3} config_count={} new_registered={} already_registered={} disabled={} register_irqfd_ms={:.3} max_route_ms={:.3} set_gsi_routes_ms={:.3}",
+            timing_start.elapsed().as_secs_f64() * 1000.0,
+            configs.len(),
+            new_registered,
+            already_registered,
+            disabled,
+            register_irqfd_ms,
+            max_route_ms,
+            set_gsi_routes_ms
+        );
+
+        Ok(())
     }
 }
 
@@ -268,6 +412,17 @@ impl InterruptManager for LegacyUserspaceInterruptManager {
     type GroupConfig = LegacyIrqGroupConfig;
 
     fn create_group(&self, config: Self::GroupConfig) -> Result<Arc<dyn InterruptSourceGroup>> {
+        self.ioapic
+            .lock()
+            .unwrap()
+            .register_legacy_irq(config.irq as usize)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to register legacy IRQ #{}: {:?}", config.irq, e),
+                )
+            })?;
+
         Ok(Arc::new(LegacyUserspaceInterruptGroup::new(
             self.ioapic.clone(),
             config.irq,
