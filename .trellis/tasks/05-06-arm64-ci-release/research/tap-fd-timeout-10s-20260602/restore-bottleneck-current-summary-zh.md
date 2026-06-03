@@ -1091,3 +1091,65 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 本地 GIC enable 延后实验代码已撤回，仅保留本段验证记录。
+
+## restore device worker 提高到 10 负向验证
+
+尝试优化：
+
+- 保持 snapshot 等其他路径语义不变。
+- 仅在 `DeviceManager::restore_device_node()` 引入临时 `MAX_RESTORE_WORKER_THREADS=10`。
+- 目标是提高单 VM 内 restore device 并行度，观察是否能缩短 `restore_devices_ms`，并摊薄 c100 下的 create-only 尾延迟。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 临时部署 shim sha256：`7ff94c26fec987f7cabecac756ea91b345c36754cbf4ac8a1528154d31266887`
+- 临时部署 cube-runtime sha256：`438cca898226f9292a66027a3b9033a9b2bc28af44c0f57499069a62e68ed4fc`
+- 回滚备份：`20260603162158`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py restore-worker10-smoke-c1-n1 1 1
+./run_create_only_case.py restore-worker10-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p90 | create p95 | create p99 | 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `31.4ms` | `31.4ms` | `31.4ms` | `31.4ms` | `31.4ms` | 清理 `1/1` |
+| c100 n200 | `100%` | `480.320ms` | `521.046ms` | `871.617ms` | `916.121ms` | `976.629ms` | 清理 `200/200` |
+
+日志观察：
+
+- `device_restore_node_total.worker_threads=10` 已确认生效。
+- 部分普通样本的 `restore_devices_ms` 可以降到约 `68-244ms`，说明更高 worker 数确实可能缩短部分 VM 的设备 restore wall time。
+- 但尾部样本中的 KVM ioctl 竞争显著放大：
+  - `interrupt_group_update_many.register_irqfd_ms` 最高约 `475.001ms`。
+  - `interrupt_group_update_many.set_gsi_routes_ms` 最高约 `300.445ms`。
+  - 单个 `interrupt_group_update_many.total_ms` 最高约 `576ms`。
+  - 尾部样本出现 `restore_devices_ms=590.115ms`、`vgic_restore_ms=271.390ms`、`vmm_vm_restore=866.020ms`。
+
+判断：
+
+- 该优化不保留。
+- c100 成功率恢复到 `100%`，但 p99 从稳定版本约 `805ms` 上升到约 `977ms`，端到端尾延迟明显退化。
+- 提高每 VM 内 restore worker 会把更多 `register_irqfd` / `set_gsi_routing` 并发压到同一批 KVM ioctl 上，局部缩短普通样本，整体放大 p95/p99。
+- 后续不应继续粗粒度提高单 VM 内设备 restore 并发；更合理的方向是围绕 MSI-X route/irqfd 数量、批次、或跨 VM 的全局 ioctl 限流做细粒度控制。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 worker=10 临时代码已撤回，仅保留本段验证记录。
