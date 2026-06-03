@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
+	"time"
 	"unsafe"
 
 	"github.com/cilium/ebpf"
@@ -38,54 +40,86 @@ func newInnerLPMMap() (*ebpf.Map, error) {
 
 // ensureInnerMap checks whether the outer hash-of-maps already has an
 // inner map for the given ifindex.  If not, it creates one and inserts it.
-func ensureInnerMap(outerMap *ebpf.Map, ifindex uint32, mapName string) error {
+func ensureInnerMap(outerMap *ebpf.Map, ifindex uint32, mapName string) (*ebpf.Map, error) {
 	// Check if inner map already exists for this ifindex.
 	var innerMapID uint32
 	err := outerMap.Lookup(&ifindex, &innerMapID)
 	if err == nil {
-		// Already present, nothing to do.
-		return nil
+		inner, err := borrowMapFromID(ebpf.MapID(innerMapID))
+		if err != nil {
+			return nil, err
+		}
+		rememberInnerMap(mapName, ifindex, inner)
+		return inner, nil
 	}
 	if !errors.Is(err, ebpf.ErrKeyNotExist) {
-		return fmt.Errorf("map.Lookup failed: %w, name: %s", err, mapName)
+		return nil, fmt.Errorf("map.Lookup failed: %w, name: %s", err, mapName)
 	}
 
 	// Create a new inner LPM trie map and insert it.
 	inner, err := newInnerLPMMap()
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer inner.Close()
 
 	err = outerMap.Put(&ifindex, inner)
 	if err != nil {
-		return fmt.Errorf("map.Put failed: %w, name: %s", err, mapName)
+		_ = inner.Close()
+		return nil, fmt.Errorf("map.Put failed: %w, name: %s", err, mapName)
 	}
-	return nil
+	rememberInnerMap(mapName, ifindex, inner)
+	return inner, nil
 }
 
 // initNetPolicy creates inner LPM trie maps for the given ifindex
 // in both allow_out and deny_out hash-of-maps, if not already present.
 // This should be called during AttachFilter.
 func initNetPolicy(ifindex uint32) error {
-	allowOut, err := loadPinnedMap(MapNameAllowOut)
-	if err != nil {
-		return err
-	}
-	defer allowOut.Close()
+	totalStart := time.Now()
+	var ensureAllowDuration time.Duration
+	var ensureDenyDuration time.Duration
+	var resultErr error
+	defer func() {
+		emitTiming(
+			"initNetPolicy",
+			map[string]string{"ifindex": strconv.FormatUint(uint64(ifindex), 10)},
+			map[string]time.Duration{
+				"ensure_allow_out": ensureAllowDuration,
+				"ensure_deny_out":  ensureDenyDuration,
+				"total":            time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
 
-	err = ensureInnerMap(allowOut, ifindex, MapNameAllowOut)
+	allowOut, err := borrowPinnedMap(MapNameAllowOut)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
 
-	denyOut, err := loadPinnedMap(MapNameDenyOut)
+	stageStart := time.Now()
+	_, err = ensureInnerMap(allowOut, ifindex, MapNameAllowOut)
+	ensureAllowDuration = time.Since(stageStart)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
-	defer denyOut.Close()
 
-	return ensureInnerMap(denyOut, ifindex, MapNameDenyOut)
+	denyOut, err := borrowPinnedMap(MapNameDenyOut)
+	if err != nil {
+		resultErr = err
+		return resultErr
+	}
+
+	stageStart = time.Now()
+	_, err = ensureInnerMap(denyOut, ifindex, MapNameDenyOut)
+	ensureDenyDuration = time.Since(stageStart)
+	if err != nil {
+		resultErr = err
+		return resultErr
+	}
+	return nil
 }
 
 // flushInnerMap removes all entries from the inner LPM trie map
@@ -156,30 +190,68 @@ func parseCIDR(s string) (lpmKey, error) {
 
 // populateInnerMap parses the given CIDR list and inserts each entry
 // into the inner LPM trie map for the specified ifindex.
-func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string) error {
-	var innerMapID uint32
-	err := outerMap.Lookup(&ifindex, &innerMapID)
-	if err != nil {
-		return fmt.Errorf("map.Lookup failed: %w", err)
-	}
+func populateInnerMap(outerMap *ebpf.Map, mapName string, ifindex uint32, cidrs []string) error {
+	totalStart := time.Now()
+	var lookupDuration time.Duration
+	var openInnerDuration time.Duration
+	var updateDuration time.Duration
+	var resultErr error
+	defer func() {
+		emitTiming(
+			"populateInnerMap",
+			map[string]string{
+				"ifindex": strconv.FormatUint(uint64(ifindex), 10),
+				"entries": strconv.Itoa(len(cidrs)),
+				"map":     mapName,
+			},
+			map[string]time.Duration{
+				"lookup_inner_id": lookupDuration,
+				"open_inner_map":  openInnerDuration,
+				"update_entries":  updateDuration,
+				"total":           time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
 
-	inner, err := ebpf.NewMapFromID(ebpf.MapID(innerMapID))
-	if err != nil {
-		return fmt.Errorf("ebpf.NewMapFromID failed: %w, id: %d", err, innerMapID)
+	inner := borrowedInnerMap(mapName, ifindex)
+	if inner == nil {
+		var innerMapID uint32
+		stageStart := time.Now()
+		err := outerMap.Lookup(&ifindex, &innerMapID)
+		lookupDuration = time.Since(stageStart)
+		if err != nil {
+			resultErr = fmt.Errorf("map.Lookup failed: %w", err)
+			return resultErr
+		}
+
+		stageStart = time.Now()
+		inner, err = borrowMapFromID(ebpf.MapID(innerMapID))
+		openInnerDuration = time.Since(stageStart)
+		if err != nil {
+			resultErr = err
+			return resultErr
+		}
+		rememberInnerMap(mapName, ifindex, inner)
 	}
-	defer inner.Close()
 
 	val := uint32(1)
+	stageStart := time.Now()
 	for _, cidr := range cidrs {
 		key, err := parseCIDR(cidr)
 		if err != nil {
-			return err
+			updateDuration += time.Since(stageStart)
+			resultErr = err
+			return resultErr
 		}
 		err = inner.Update(&key, &val, ebpf.UpdateAny)
 		if err != nil {
-			return fmt.Errorf("inner map update failed: %w, cidr: %s", err, cidr)
+			updateDuration += time.Since(stageStart)
+			resultErr = fmt.Errorf("inner map update failed: %w, cidr: %s", err, cidr)
+			return resultErr
 		}
 	}
+	updateDuration += time.Since(stageStart)
 	return nil
 }
 
@@ -191,21 +263,48 @@ func populateInnerMap(outerMap *ebpf.Map, ifindex uint32, cidrs []string) error 
 //   - DenyOut always includes alwaysDeniedSandboxCIDRs.
 //   - AllowInternetAccess=false: DenyOut is set to "0.0.0.0/0" (deny all).
 func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
+	totalStart := time.Now()
+	var populateAllowDuration time.Duration
+	var populateDenyDuration time.Duration
+	var resultErr error
+	allowCount := 0
+	denyCount := 0
+	defer func() {
+		emitTiming(
+			"applyNetPolicy",
+			map[string]string{
+				"ifindex":     strconv.FormatUint(uint64(ifindex), 10),
+				"allow_count": strconv.Itoa(allowCount),
+				"deny_count":  strconv.Itoa(denyCount),
+			},
+			map[string]time.Duration{
+				"populate_allow": populateAllowDuration,
+				"populate_deny":  populateDenyDuration,
+				"total":          time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
+
 	// Process allowOut.
 	var allowOut []string
 	if opts.AllowOut != nil {
 		allowOut = *opts.AllowOut
 	}
+	allowCount = len(allowOut)
 	if len(allowOut) > 0 {
-		allowOutMap, err := loadPinnedMap(MapNameAllowOut)
+		allowOutMap, err := borrowPinnedMap(MapNameAllowOut)
 		if err != nil {
-			return err
+			resultErr = err
+			return resultErr
 		}
-		defer allowOutMap.Close()
 
-		err = populateInnerMap(allowOutMap, ifindex, allowOut)
+		stageStart := time.Now()
+		err = populateInnerMap(allowOutMap, MapNameAllowOut, ifindex, allowOut)
+		populateAllowDuration = time.Since(stageStart)
 		if err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameAllowOut, err)
+			resultErr = fmt.Errorf("populate %s failed: %w", MapNameAllowOut, err)
+			return resultErr
 		}
 	}
 
@@ -221,17 +320,21 @@ func applyNetPolicy(ifindex uint32, opts MVMOptions) error {
 			denyOut = append(denyOut, alwaysDeniedSandboxCIDRs...)
 		}
 	}
+	denyCount = len(denyOut)
 
 	if len(denyOut) > 0 {
-		denyOutMap, err := loadPinnedMap(MapNameDenyOut)
+		denyOutMap, err := borrowPinnedMap(MapNameDenyOut)
 		if err != nil {
-			return err
+			resultErr = err
+			return resultErr
 		}
-		defer denyOutMap.Close()
 
-		err = populateInnerMap(denyOutMap, ifindex, denyOut)
+		stageStart := time.Now()
+		err = populateInnerMap(denyOutMap, MapNameDenyOut, ifindex, denyOut)
+		populateDenyDuration = time.Since(stageStart)
 		if err != nil {
-			return fmt.Errorf("populate %s failed: %w", MapNameDenyOut, err)
+			resultErr = fmt.Errorf("populate %s failed: %w", MapNameDenyOut, err)
+			return resultErr
 		}
 	}
 

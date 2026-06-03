@@ -15,7 +15,7 @@ func pinPath(name string) string {
 
 func loadPinnedMap(name string) (*ebpf.Map, error) {
 	path := pinPath(name)
-	m, err := ebpf.LoadPinnedMap(path, nil)
+	m, err := ebpfLoadPinnedMap(path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("ebpf.LoadPinnedMap failed: %w, name: %s", err, name)
 	}

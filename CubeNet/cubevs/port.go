@@ -3,12 +3,37 @@ package cubevs
 import (
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
 
 // AddPortMapping adds port mapping for host port and guest port.
 func AddPortMapping(ifindex uint32, listenPort uint16, hostPort uint16) error {
+	totalStart := time.Now()
+	origListenPort := listenPort
+	origHostPort := hostPort
+	var updateRemoteDuration time.Duration
+	var updateLocalDuration time.Duration
+	var resultErr error
+	defer func() {
+		emitTiming(
+			"AddPortMapping",
+			map[string]string{
+				"ifindex":     strconv.FormatUint(uint64(ifindex), 10),
+				"listen_port": strconv.Itoa(int(origListenPort)),
+				"host_port":   strconv.Itoa(int(origHostPort)),
+			},
+			map[string]time.Duration{
+				"update_remote": updateRemoteDuration,
+				"update_local":  updateLocalDuration,
+				"total":         time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
+
 	listenPort = htons(listenPort)
 	hostPort = htons(hostPort)
 	mvmPort := MVMPort{
@@ -17,27 +42,35 @@ func AddPortMapping(ifindex uint32, listenPort uint16, hostPort uint16) error {
 	}
 
 	// host port => ifindex + listen port
-	m1, err := loadPinnedMap(MapNameRemotePortMapping)
+	stageStart := time.Now()
+	m1, err := borrowPinnedMap(MapNameRemotePortMapping)
 	if err != nil {
-		return err
+		updateRemoteDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
-	defer m1.Close()
 
 	err = m1.Update(&hostPort, &mvmPort, ebpf.UpdateAny)
+	updateRemoteDuration = time.Since(stageStart)
 	if err != nil {
-		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameRemotePortMapping)
+		resultErr = fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameRemotePortMapping)
+		return resultErr
 	}
 
 	// ifindex + listen port => host port
-	m2, err := loadPinnedMap(MapNameLocalPortMapping)
+	stageStart = time.Now()
+	m2, err := borrowPinnedMap(MapNameLocalPortMapping)
 	if err != nil {
-		return err
+		updateLocalDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
-	defer m2.Close()
 
 	err = m2.Update(&mvmPort, &hostPort, ebpf.UpdateAny)
+	updateLocalDuration = time.Since(stageStart)
 	if err != nil {
-		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameLocalPortMapping)
+		resultErr = fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameLocalPortMapping)
+		return resultErr
 	}
 
 	return nil

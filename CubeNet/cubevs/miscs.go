@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
@@ -91,6 +93,8 @@ func attachTCFilter(progName string, ifindex uint32, direction TCDirection) erro
 
 // Init should be called once before invoking any other CubeVS APIs.
 func Init(params Params) error {
+	resetPinnedObjectCache()
+
 	_ = os.Remove(pinPath("tungrp_to_tuns")) // NOCC:Path Traversal()
 
 	err := loadObject(params, loadLocalgw, "loadLocalgw")
@@ -126,26 +130,63 @@ func Init(params Params) error {
 		return err
 	}
 
+	resetPinnedObjectCache()
 	return nil
 }
 
 // AttachFilter attaches a BPF TC filter to the ingress path of the TAP device specified by ifindex.
 func AttachFilter(ifindex uint32) error {
-	prog, err := ebpf.LoadPinnedProgram(pinPath(programNameFromCube), nil)
-	if err != nil {
-		return fmt.Errorf("ebpf.LoadPinnedProgram failed: %w, name: %s", err, programNameFromCube)
-	}
-	defer prog.Close()
+	totalStart := time.Now()
+	var borrowProgramDuration time.Duration
+	var createQdiscDuration time.Duration
+	var attachFilterDuration time.Duration
+	var initNetPolicyDuration time.Duration
+	var resultErr error
+	defer func() {
+		emitTiming(
+			"AttachFilter",
+			map[string]string{"ifindex": strconv.FormatUint(uint64(ifindex), 10)},
+			map[string]time.Duration{
+				"borrow_program":  borrowProgramDuration,
+				"create_qdisc":    createQdiscDuration,
+				"attach_filter":   attachFilterDuration,
+				"init_net_policy": initNetPolicyDuration,
+				"total":           time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
 
+	stageStart := time.Now()
+	prog, err := borrowPinnedProgram(programNameFromCube)
+	borrowProgramDuration = time.Since(stageStart)
+	if err != nil {
+		resultErr = err
+		return resultErr
+	}
+
+	stageStart = time.Now()
 	err = createQdisc(ifindex)
+	createQdiscDuration = time.Since(stageStart)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
 
+	stageStart = time.Now()
 	err = attachFilter(ifindex, uint32(prog.FD()), programNameFromCube, TCIngress)
+	attachFilterDuration = time.Since(stageStart)
 	if err != nil {
-		return err
+		resultErr = err
+		return resultErr
 	}
 
-	return initNetPolicy(ifindex)
+	stageStart = time.Now()
+	err = initNetPolicy(ifindex)
+	initNetPolicyDuration = time.Since(stageStart)
+	if err != nil {
+		resultErr = err
+		return resultErr
+	}
+	return nil
 }

@@ -3,6 +3,8 @@ package cubevs
 import (
 	"fmt"
 	"net"
+	"strconv"
+	"time"
 
 	"github.com/cilium/ebpf"
 )
@@ -42,8 +44,36 @@ func ListTAPDevices() ([]TAPDevice, error) {
 
 // AddTAPDevice adds a new device to CubeVS.
 func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVMOptions) error {
+	totalStart := time.Now()
+	var idPrepareDuration time.Duration
+	var updateMetadataDuration time.Duration
+	var updateIPIndexDuration time.Duration
+	var applyNetPolicyDuration time.Duration
+	var resultErr error
+	defer func() {
+		emitTiming(
+			"AddTAPDevice",
+			map[string]string{
+				"ifindex": strconv.FormatUint(uint64(ifindex), 10),
+				"ip":      ip.String(),
+				"id":      id,
+			},
+			map[string]time.Duration{
+				"prepare":             idPrepareDuration,
+				"update_mvm_metadata": updateMetadataDuration,
+				"update_mvm_ip_index": updateIPIndexDuration,
+				"apply_net_policy":    applyNetPolicyDuration,
+				"total":               time.Since(totalStart),
+			},
+			resultErr,
+		)
+	}()
+
+	stageStart := time.Now()
 	if len(id) > maxIDLength {
-		return ErrTooLong
+		idPrepareDuration = time.Since(stageStart)
+		resultErr = ErrTooLong
+		return resultErr
 	}
 
 	mvmIP := ipToUint32(ip)
@@ -52,32 +82,48 @@ func AddTAPDevice(ifindex uint32, ip net.IP, id string, version uint32, opts MVM
 		UUID:    stringToByteArray(id),
 		Version: version,
 	}
+	idPrepareDuration = time.Since(stageStart)
 
 	// ifindex <-> MVM metadata (IP, ID and tunnels)
-	m, err := loadPinnedMap(MapNameIfindexToMVMMetadata)
+	stageStart = time.Now()
+	m, err := borrowPinnedMap(MapNameIfindexToMVMMetadata)
 	if err != nil {
-		return err
+		updateMetadataDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
-	defer m.Close()
 
 	err = m.Update(&ifindex, &mvmID, ebpf.UpdateAny)
+	updateMetadataDuration = time.Since(stageStart)
 	if err != nil {
-		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+		resultErr = fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameIfindexToMVMMetadata)
+		return resultErr
 	}
 
 	// MVM IP <-> ifindex
-	m, err = loadPinnedMap(MapNameMVMIPToIfindex)
+	stageStart = time.Now()
+	m, err = borrowPinnedMap(MapNameMVMIPToIfindex)
 	if err != nil {
-		return err
+		updateIPIndexDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
-	defer m.Close()
 
 	err = m.Update(&mvmIP, &ifindex, ebpf.UpdateAny)
+	updateIPIndexDuration = time.Since(stageStart)
 	if err != nil {
-		return fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+		resultErr = fmt.Errorf("map.Update failed: %w, name: %s", err, MapNameMVMIPToIfindex)
+		return resultErr
 	}
 
-	return applyNetPolicy(ifindex, opts)
+	stageStart = time.Now()
+	err = applyNetPolicy(ifindex, opts)
+	applyNetPolicyDuration = time.Since(stageStart)
+	if err != nil {
+		resultErr = err
+		return resultErr
+	}
+	return nil
 }
 
 // DelTAPDevice removes a TAP device from CubeVS.
