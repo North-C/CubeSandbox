@@ -1027,3 +1027,67 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 本地 worker=2 临时代码已撤回，仅保留本段验证记录。
+
+## ARM64 GIC enable 延后到设备 restore 后负向验证
+
+尝试优化：
+
+- 将 `Vm::restore()` 中 ARM64 vGIC restore 拆成两段。
+- 第一段仍在 `restore_devices()` 前完成 GIC 创建、PMU 初始化、GICR typer 设置和 GIC state restore。
+- 第二段将 `Gic::enable()` 延后到 `restore_devices()` 后、`start_restored_vcpus()` 前执行。
+- 目标是错开 c100 下早期 GIC legacy IRQ routing ioctl 和设备 MSI-X irqfd/GSI routing ioctl 的拥塞峰值。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 构建耗时：`4m01s`
+- 临时部署 shim sha256：`4cfb95055b6546fc3ced5da19256089fb63b366f5da689fe97c05eecc0051fe4`
+- 临时部署 cube-runtime sha256：`fe2eebafb6f9b571e9a857822cc80c6cba94b9ea3f92bcf966394bc06c5c3bce`
+- 回滚备份：`20260603161315`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py gic-enable-after-devices-smoke-c1-n1 1 1
+./run_create_only_case.py gic-enable-after-devices-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p95 | create p99 | 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `33.4ms` | `33.4ms` | `33.4ms` | `33.4ms` | 清理 `1/1` |
+| c100 n200 | `100%` | `508.023ms` | `541.835ms` | `909.833ms` | `959.489ms` | 清理 `200/200` |
+
+日志观察：
+
+- `vgic_restore_state_detail.total_ms` 降到约 `0.5ms`，说明 GIC create/state restore 本身很轻。
+- 延后的 `vgic_enable_interrupt_detail.total_ms` 多数约 `20-45ms`，单独看并不大。
+- 但设备 restore 阶段的 MSI-X `interrupt_group_update_many` 长尾明显放大：
+  - `set_gsi_routes_ms` 可达约 `80-133ms`。
+  - `register_irqfd_ms` 可达约 `180-230ms`。
+  - 单个 `update_many.total_ms` 可达约 `300ms+`。
+- `restore_devices_ms` 在后段样本中仍约 `360-424ms`，整体 create p99 退化到约 `959ms`。
+
+判断：
+
+- 该优化不保留。
+- 延后 GIC enable 可以降低 `vgic_restore_ms` 的账面值，但没有降低端到端尾延迟；设备 MSI-X route/irqfd ioctl 反而承担了更明显的长尾。
+- 稳定性保持 `100%`，但性能差于稳定基线 c100 p99 约 `805ms`。
+- 后续不应继续通过简单调整 GIC enable 与 device restore 的顺序来优化；更需要针对 MSI-X `register_irqfd` / `set_gsi_routing` 本身做数量减少、批次策略或全局 ioctl 限流。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 GIC enable 延后实验代码已撤回，仅保留本段验证记录。
