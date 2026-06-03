@@ -892,3 +892,77 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
 - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
 - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 原子替换备份：`20260603150256`
+
+## restore 阶段延迟 GSI route flush 负向验证
+
+尝试优化：
+
+- 在 `InterruptManager` trait 上增加 restore 阶段 route update 延迟刷新钩子。
+- `MsiInterruptGroup::update()` / `update_many()` 在延迟段只更新共享 route map 并标记 dirty。
+- `DeviceManager::restore_devices()` 包裹设备 restore 批次，结束时由 `MsiInterruptManager` 统一调用一次 `set_gsi_routing`。
+- 目标是减少同一个 VM 内多个 MSI-X group 并发调用 `set_gsi_routing` 的内核开销。
+
+本地 x86 验证：
+
+```bash
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 构建耗时：`4m06s`
+- 临时部署 shim sha256：`01ec0f5b485bd256ed614afe2eb9b8088244a2edc65709ccf93f4b7039598172`
+- 临时部署 cube-runtime sha256：`639bb9949a5c0fdc23ad52bf728e61e96391340e10ae8ca2bc8e4c8f7daeaec3`
+- 回滚备份：`20260603155055`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py deferred-routes-smoke-c1-n1 1 1
+./run_create_only_case.py deferred-routes-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | create avg | create p50 | create p95 | create p99 | total_time / 备注 |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| c1 n1 smoke | `100%` | `31.8ms` | `31.8ms` | `31.8ms` | `31.8ms` | 清理 `1/1` |
+| c100 n200 | `99.5%` | `464.098ms` | `547.733ms` | `856.977ms` | `902.983ms` | 1 个 shim TTRPC 连接失败 |
+
+c100 错误：
+
+- `failed to start shim: start failed: failed to create TTRPC connection`
+- 残留异常 shim：`containerd-shim-cube-rs -id 5f3d7fb0c7984df78b82cecc21aab26e`
+
+VMM 日志观察：
+
+- 每个 `interrupt_group_update_many` 内 `set_gsi_routes_ms` 降到约 `0.001ms`，`deferred_route_update=true`。
+- 批次末尾 `msi_deferred_route_flush.total_ms` 约 `0.07-0.09ms`，`route_count=31`。
+- 但 `register_irqfd_ms` 仍在高并发下出现百毫秒级长尾；示例中单组 `register_irqfd_ms` 可达 `167ms`、`201ms`、`230ms`。
+
+判断：
+
+- 该优化不保留。
+- 延迟合并 `set_gsi_routing` 本身生效，但当前 c100 主体瓶颈已经转向并发 `register_irqfd` 和 ARM64 VGIC ioctl 排队。
+- 在当前 restore 启动时序中延迟 route flush 还引入可靠性风险，c100 成功率从稳定版本的 `100%` 降到 `99.5%`，且产生残留 shim。
+- 后续优化不应继续沿“只合并 GSI route flush”方向推进，应转向减少/限流 irqfd 注册风暴，或控制 VMM restore 内设备/GIC ioctl 并发度。
+
+恢复操作：
+
+```bash
+kill -9 3349924
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py post-rollback-smoke-c1-n1 1 1
+```
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 回滚 smoke：create p99 `32.1ms`，成功率 `100%`，清理 `1/1`。
+- 本地 deferred route flush 代码已撤回，仅保留本段验证记录。
