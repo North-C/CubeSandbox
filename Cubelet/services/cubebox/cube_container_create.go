@@ -141,13 +141,46 @@ type createContainerParam struct {
 }
 
 func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateContext) error {
+	totalStart := time.Now()
+	var runtimeLookupDuration time.Duration
+	var sandboxInitDuration time.Duration
+	var createCubeboxContainerDuration time.Duration
+	var genSandboxOptionsDuration time.Duration
+	var buildParamsDuration time.Duration
+	var runContainersDuration time.Duration
+	var saveDuration time.Duration
+	var updateCgroupDuration time.Duration
+	var resultErr error
+	defer func() {
+		log.G(ctx).Infof(
+			"cubelet timing createContainers: sandbox_id=%s instance_type=%s runtime_lookup_ms=%.3f sandbox_init_ms=%.3f create_cubebox_container_ms=%.3f gen_sandbox_options_ms=%.3f build_params_ms=%.3f run_containers_ms=%.3f save_ms=%.3f update_cgroup_ms=%.3f total_ms=%.3f err=%v",
+			flowOpts.GetSandboxID(),
+			flowOpts.GetInstanceType(),
+			durationMillis(runtimeLookupDuration),
+			durationMillis(sandboxInitDuration),
+			durationMillis(createCubeboxContainerDuration),
+			durationMillis(genSandboxOptionsDuration),
+			durationMillis(buildParamsDuration),
+			durationMillis(runContainersDuration),
+			durationMillis(saveDuration),
+			durationMillis(updateCgroupDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	realReq := flowOpts.ReqInfo
 
+	stageStart := time.Now()
 	ociRuntime, err := l.getSandboxRuntime(realReq)
 	if err != nil {
-		return ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+		rerr := ret.Err(errorcode.ErrorCode_InvalidParamFormat, err.Error())
+		runtimeLookupDuration = time.Since(stageStart)
+		resultErr = rerr
+		return rerr
 	}
+	runtimeLookupDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	sandBox := &cubeboxstore.CubeBox{
 		Metadata: cubeboxstore.Metadata{
 			ID:           flowOpts.SandboxID,
@@ -193,14 +226,23 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	sandBox.Metadata.AddLabels(l.genListFilterLabels(ctx, realReq, sandBox))
+	sandboxInitDuration = time.Since(stageStart)
+	stageStart = time.Now()
 	if err = l.createCubeboxContainer(ctx, flowOpts, realReq, sandBox); err != nil {
+		createCubeboxContainerDuration = time.Since(stageStart)
+		resultErr = err
 		return err
 	}
+	createCubeboxContainerDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	additionalSandboxOpt, err := l.genSandboxOptions(ctx, realReq, sandBox, flowOpts)
 	if err != nil {
+		genSandboxOptionsDuration = time.Since(stageStart)
+		resultErr = err
 		return err
 	}
+	genSandboxOptionsDuration = time.Since(stageStart)
 
 	var (
 		params    []createContainerParam
@@ -215,10 +257,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			Value: c.Id,
 		})
 	}
+	stageStart = time.Now()
 	for i, cntrReq := range realReq.Containers {
 		ci, err := sandBox.Get(cntrReq.Id)
 		if err != nil {
-			return ret.Err(errorcode.ErrorCode_CreateContainerFailed, fmt.Sprintf("get container info failed.%s", err.Error()))
+			resultErr = ret.Err(errorcode.ErrorCode_CreateContainerFailed, fmt.Sprintf("get container info failed.%s", err.Error()))
+			buildParamsDuration = time.Since(stageStart)
+			return resultErr
 		}
 		var (
 			additionalOpt []oci.SpecOpts
@@ -245,6 +290,8 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			}
 		} else {
 			containerLog.Errorf("create container oci spec failed.%s", err.Error())
+			resultErr = err
+			buildParamsDuration = time.Since(stageStart)
 			return err
 		}
 
@@ -262,6 +309,8 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 		workflow.RecordCreateMetric(ctxTmp, err, constants.CubeContainerSpecId, time.Since(start))
 		if err != nil {
 			containerLog.Errorf("create container Spec failed.%s", err.Error())
+			resultErr = err
+			buildParamsDuration = time.Since(stageStart)
 			return err
 		}
 		params = append(params, createContainerParam{
@@ -271,15 +320,19 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			cntrReq: cntrReq,
 		})
 	}
+	buildParamsDuration = time.Since(stageStart)
 
 	sandBox.Lock()
 	defer func() {
+		saveStart := time.Now()
 		if err := l.cubeboxManger.Save(ctx, sandBox); err != nil {
 			log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
 		}
+		saveDuration = time.Since(saveStart)
 		sandBox.Unlock()
 	}()
 
+	stageStart = time.Now()
 	for _, param := range params {
 		ci := param.ci
 		containerLog := sanboxlog.WithFields(CubeLog.Fields{
@@ -315,9 +368,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			return retE
 		}()
 		if err != nil {
-			return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
+			resultErr = fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
+			runContainersDuration = time.Since(stageStart)
+			return resultErr
 		}
 		if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
+			resultErr = err
+			runContainersDuration = time.Since(stageStart)
 			return err
 		}
 		err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
@@ -325,6 +382,7 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 			containerLog.Errorf("post create container failed, err: %v", err)
 		}
 	}
+	runContainersDuration = time.Since(stageStart)
 
 	pid := sandBox.Endpoint.Pid
 
@@ -336,11 +394,13 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 	}
 
 	if !config.GetCommon().DisableVmCgroup && !constants.GetDisableVMCgroup(ctx) {
+		stageStart = time.Now()
 		for _, ci := range sandBox.AllContainers() {
 			if err := updateCgroup(ctx, ci); err != nil {
 				sanboxlog.Errorf("failed to update container %v cgroup: %v", ci.ID, err)
 			}
 		}
+		updateCgroupDuration = time.Since(stageStart)
 	}
 
 	return nil
@@ -399,7 +459,23 @@ func (l *local) genImageReferenceForCubebox(ctx context.Context, flowOpts *workf
 }
 
 func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.CreateContext, realReq *cubebox.RunCubeSandboxRequest, sandBox *cubeboxstore.CubeBox) error {
+	totalStart := time.Now()
+	var prepareFilesDuration time.Duration
+	var saveDuration time.Duration
+	var resultErr error
+	defer func() {
+		log.G(ctx).Infof(
+			"cubelet timing createCubeboxContainer: sandbox_id=%s containers=%d prepare_files_ms=%.3f save_ms=%.3f total_ms=%.3f err=%v",
+			flowOpts.GetSandboxID(),
+			len(realReq.GetContainers()),
+			durationMillis(prepareFilesDuration),
+			durationMillis(saveDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	for i, cntrReq := range realReq.Containers {
+		containerStart := time.Now()
 		isPod := i == 0
 		_, cid := l.generateContainerID(ctx, flowOpts, i)
 
@@ -441,16 +517,34 @@ func (l *local) createCubeboxContainer(ctx context.Context, flowOpts *workflow.C
 		}
 		ci.AddAnnotations(ci.Metadata.Config.Annotations)
 		sandBox.AddContainer(ci)
+		stageStart := time.Now()
 		err := l.prepareContainerFiles(ctx, sandBox, cntrReq, flowOpts, i)
+		prepareDuration := time.Since(stageStart)
+		prepareFilesDuration += prepareDuration
+		log.G(ctx).Infof(
+			"cubelet timing prepareContainerFiles: sandbox_id=%s container_id=%s index=%d is_pod=%t duration_ms=%.3f total_container_ms=%.3f err=%v",
+			flowOpts.GetSandboxID(),
+			cid,
+			i,
+			isPod,
+			durationMillis(prepareDuration),
+			durationMillis(time.Since(containerStart)),
+			err,
+		)
 		if err != nil {
-			return fmt.Errorf("prepare container files failed: %w", err)
+			resultErr = fmt.Errorf("prepare container files failed: %w", err)
+			return resultErr
 		}
 	}
 
+	stageStart := time.Now()
 	if err := l.cubeboxManger.Save(ctx, sandBox, cubes.WithNoEvent); err != nil {
+		saveDuration = time.Since(stageStart)
 		log.G(ctx).Warnf("saveSandBoxInfo failed.%s", err.Error())
-		return ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
+		resultErr = ret.Err(errorcode.ErrorCode_UpdateLocalMetaDataFailed, err.Error())
+		return resultErr
 	}
+	saveDuration = time.Since(stageStart)
 	return nil
 }
 
@@ -643,66 +737,125 @@ func WithCubeFsAnnotation(ctx context.Context,
 func (l *local) containerOciSpec(ctx context.Context, containerReq *cubebox.ContainerConfig,
 	flowOpts *workflow.CreateContext, ci *cubeboxstore.Container,
 	sandBox *cubeboxstore.CubeBox) (specOpts []oci.SpecOpts, err error) {
+	totalStart := time.Now()
+	var genBaseOptDuration time.Duration
+	var runtimeCfgDuration time.Duration
+	var hooksDuration time.Duration
+	var localResolveDuration time.Duration
+	var rootfsOptDuration time.Duration
+	var cbriDuration time.Duration
+	var writableRootfsDuration time.Duration
+	var cgroupDuration time.Duration
+	var networkAnnotationDuration time.Duration
+	var volumeDuration time.Duration
+	defer func() {
+		log.G(ctx).Infof(
+			"cubelet timing containerOciSpec: sandbox_id=%s container_id=%s is_pod=%t gen_base_ms=%.3f runtime_cfg_ms=%.3f hooks_ms=%.3f local_resolve_ms=%.3f rootfs_opt_ms=%.3f cbri_ms=%.3f writable_rootfs_ms=%.3f cgroup_ms=%.3f network_annotation_ms=%.3f volume_ms=%.3f total_ms=%.3f err=%v",
+			flowOpts.GetSandboxID(),
+			ci.ID,
+			ci.IsPod,
+			durationMillis(genBaseOptDuration),
+			durationMillis(runtimeCfgDuration),
+			durationMillis(hooksDuration),
+			durationMillis(localResolveDuration),
+			durationMillis(rootfsOptDuration),
+			durationMillis(cbriDuration),
+			durationMillis(writableRootfsDuration),
+			durationMillis(cgroupDuration),
+			durationMillis(networkAnnotationDuration),
+			durationMillis(volumeDuration),
+			durationMillis(time.Since(totalStart)),
+			err,
+		)
+	}()
 
+	stageStart := time.Now()
 	specOpts = append(specOpts, container.GenOpt(ctx, containerReq)...)
+	genBaseOptDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	specOpts = append(specOpts, l.genRuntimeCfgAnnotationOpt(ctx, sandBox.OciRuntime, flowOpts)...)
+	runtimeCfgDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	if opt, err := l.genHooksOpts(ctx, flowOpts, containerReq); err != nil {
+		hooksDuration = time.Since(stageStart)
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "gen hooks opts failed: %v", err)
 	} else {
+		hooksDuration = time.Since(stageStart)
 		specOpts = append(specOpts, opt)
 	}
 
 	imageSpecConfig := &imagespec.ImageConfig{}
 	if !isImageStorageMediaType(containerReq, cubeimages.ImageStorageMediaType_ext4) {
 		var image cristore.Image
+		stageStart = time.Now()
 		image, err = l.criImage.LocalResolve(ctx, containerReq.GetImage().GetImage())
 		if err != nil {
+			localResolveDuration = time.Since(stageStart)
 			return nil, ret.Errorf(errorcode.ErrorCode_ResolveLocalSpecFailed,
 				"local resolve image %q: %v", containerReq.GetImage().Image, err)
 		}
+		localResolveDuration = time.Since(stageStart)
 		imageSpecConfig = &image.ImageSpec.Config
 
+		stageStart = time.Now()
 		opts, err := rootfs.GenRootfsOpt(ctx, containerReq, &image)
 		if err != nil {
+			rootfsOptDuration = time.Since(stageStart)
 			return nil, ret.Errorf(errorcode.ErrorCode_CreateContainerFailed, "generate rootfs options failed: %v", err)
 		}
+		rootfsOptDuration = time.Since(stageStart)
 		specOpts = append(specOpts, opts...)
 	}
 
+	stageStart = time.Now()
 	opts, err := l.cbriBeforeCreateContainer(ctx, flowOpts, sandBox, ci)
 	if err != nil {
+		cbriDuration = time.Since(stageStart)
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "cbri before create container failed: %v", err)
 	}
+	cbriDuration = time.Since(stageStart)
 	specOpts = append(specOpts, opts...)
 
 	specOpts = append(specOpts, genGeneralContainerSpecOpt(ctx, containerReq, ci, imageSpecConfig)...)
 
+	stageStart = time.Now()
 	opt, err := l.prepareWritableRootfs(ctx, flowOpts, containerReq)
 	if err != nil {
+		writableRootfsDuration = time.Since(stageStart)
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "prepare writable rootfs failed: %v", err)
 	}
+	writableRootfsDuration = time.Since(stageStart)
 	specOpts = append(specOpts, opt)
 
+	stageStart = time.Now()
 	cgroupOpts, err := cgroup.GenOpt(ctx, containerReq)
 	if err != nil {
+		cgroupDuration = time.Since(stageStart)
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "failed to gen resource: %s", err.Error())
 	}
+	cgroupDuration = time.Since(stageStart)
 	specOpts = append(specOpts, cgroupOpts...)
 
 	specOpts = append(specOpts, l.genCgroupAnnotationOpt(ctx, containerReq, flowOpts)...)
 
+	stageStart = time.Now()
 	netOpts, err := l.genNetworkAnnotationOpt(ctx, containerReq, flowOpts, ci)
 	if err != nil {
+		networkAnnotationDuration = time.Since(stageStart)
 		return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "generate network annotation failed: %v", err)
 	}
+	networkAnnotationDuration = time.Since(stageStart)
 	specOpts = append(specOpts, netOpts...)
 
+	stageStart = time.Now()
 	opt, err = l.prepareVolume(ctx, containerReq, flowOpts, ci)
 	if err != nil {
+		volumeDuration = time.Since(stageStart)
 		return nil, ret.WrapWithDefaultError(err, errorcode.ErrorCode_CreateVolumeFailed)
 	}
+	volumeDuration = time.Since(stageStart)
 	specOpts = append(specOpts, opt)
 
 	specOpts = append(specOpts, l.genVirtFsAnnotationOpt(ctx, flowOpts, ci.CubeRootfsInfo))
@@ -1141,14 +1294,40 @@ func (l *local) runContainer(
 	cOpts []containerd.NewContainerOpts,
 	ociRuntime cubeconfig.Runtime) (err error) {
 
+	totalStart := time.Now()
+	var newContainerDuration time.Duration
+	var newTaskDuration time.Duration
+	var shimEndpointDuration time.Duration
+	var waitTaskDuration time.Duration
+	var startTaskDuration time.Duration
+	var updateStatusDuration time.Duration
+	defer func() {
+		log.G(ctx).Infof(
+			"cubelet timing runContainer: sandbox_id=%s container_id=%s is_pod=%t new_container_ms=%.3f new_task_ms=%.3f shim_endpoint_ms=%.3f wait_task_ms=%.3f start_task_ms=%.3f update_status_ms=%.3f total_ms=%.3f err=%v",
+			cubebox.ID,
+			ci.ID,
+			ci.IsPod,
+			durationMillis(newContainerDuration),
+			durationMillis(newTaskDuration),
+			durationMillis(shimEndpointDuration),
+			durationMillis(waitTaskDuration),
+			durationMillis(startTaskDuration),
+			durationMillis(updateStatusDuration),
+			durationMillis(time.Since(totalStart)),
+			err,
+		)
+	}()
+
 	start := time.Now()
 	c, err := l.client.NewContainer(ctx, ci.ID, cOpts...)
 	if err != nil {
+		newContainerDuration = time.Since(start)
 		workflow.RecordCreateMetric(ctx, ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, err.Error()),
-			constants.CubeNewContainerId, time.Since(start))
+			constants.CubeNewContainerId, newContainerDuration)
 		return ret.Err(errorcode.ErrorCode_NewContainerMetaDataFailed, fmt.Errorf("failed to create container [%s]: %w", ci.ID, err).Error())
 	}
-	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, time.Since(start))
+	newContainerDuration = time.Since(start)
+	workflow.RecordCreateMetric(ctx, err, constants.CubeNewContainerId, newContainerDuration)
 
 	ci.Container = c
 
@@ -1173,14 +1352,18 @@ func (l *local) runContainer(
 	taskStart := time.Now()
 	task, err := c.NewTask(ctx, ioCreater, taskOpts...)
 	if err != nil {
+		newTaskDuration = time.Since(taskStart)
 		return transformError(err)
 	}
+	newTaskDuration = time.Since(taskStart)
 	workflow.RecordCreateMetric(ctx, err,
 		constants.CubeShimCreatetId,
-		time.Since(taskStart))
+		newTaskDuration)
 	if ci.IsPod {
+		stageStart := time.Now()
 		shim, err := l.shims.Get(ctx, ci.ID)
 		if err != nil {
+			shimEndpointDuration = time.Since(stageStart)
 			return ret.Err(errorcode.ErrorCode_ContainerNotFound, fmt.Sprintf("get shim %s failed, err: %v", ci.ID, err))
 		}
 		ep, v := shim.Endpoint()
@@ -1190,23 +1373,32 @@ func (l *local) runContainer(
 			Version: uint32(v),
 			Pid:     task.Pid(),
 		}
+		shimEndpointDuration = time.Since(stageStart)
 	}
 
+	stageStart := time.Now()
 	exitCh, err := task.Wait(ctx)
 	if err != nil {
+		waitTaskDuration = time.Since(stageStart)
 		return ret.Err(errorcode.ErrorCode_WaitTaskFailed, err.Error())
 	}
+	waitTaskDuration = time.Since(stageStart)
 	ci.ExitCh = exitCh
 
+	stageStart = time.Now()
 	if err := task.Start(ctx); err != nil {
+		startTaskDuration = time.Since(stageStart)
 		return ret.Err(errorcode.ErrorCode_StartTaskFailed, err.Error())
 	}
+	startTaskDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	ci.Status.Update(func(status cubeboxstore.Status) (cubeboxstore.Status, error) {
 		status.Pid = task.Pid()
 		status.StartedAt = time.Now().UnixNano()
 		return status, nil
 	})
+	updateStatusDuration = time.Since(stageStart)
 	workflow.RecordCreateMetric(ctx, err,
 		constants.CubeShimStartId,
 		time.Since(taskStart))

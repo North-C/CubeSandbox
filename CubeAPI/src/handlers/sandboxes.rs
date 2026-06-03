@@ -159,6 +159,7 @@ pub async fn create_sandbox(
     State(state): State<AppState>,
     Json(body): Json<NewSandbox>,
 ) -> AppResult<impl IntoResponse> {
+    let total_start = std::time::Instant::now();
     let template_id = body.template_id.clone();
     let timeout = body.timeout;
     state
@@ -171,16 +172,27 @@ pub async fn create_sandbox(
         )
         .await;
 
+    let service_start = std::time::Instant::now();
     let created = state.services.sandboxes.create_sandbox(body).await?;
+    let service_ms = service_start.elapsed().as_secs_f64() * 1000.0;
     let sandbox_id = created.sandbox_id.clone();
+    let total_ms = total_start.elapsed().as_secs_f64() * 1000.0;
 
-    tracing::info!(sandbox_id = %sandbox_id, template_id = %template_id, "create_sandbox: success");
+    tracing::info!(
+        sandbox_id = %sandbox_id,
+        template_id = %template_id,
+        service_ms = service_ms,
+        total_ms = total_ms,
+        "cubeapi timing create_sandbox handler"
+    );
     state
         .logger
         .log(
             LogEvent::new(LogLevel::Info, "sandbox.created")
                 .field("sandbox_id", &sandbox_id)
-                .field("template_id", &template_id),
+                .field("template_id", &template_id)
+                .field_value("service_ms", service_ms)
+                .field_value("total_ms", total_ms),
         )
         .await;
 

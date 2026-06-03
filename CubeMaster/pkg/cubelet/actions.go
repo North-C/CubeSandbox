@@ -14,6 +14,7 @@ import (
 	cubebox "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	imagesv1 "github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/images/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/config"
+	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/log"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/ret"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/cubelet/grpcconn"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/errorcode"
@@ -35,14 +36,41 @@ func Destroy(ctx context.Context, calleeEp string,
 
 func Create(ctx context.Context, calleeEp string,
 	req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	totalStart := time.Now()
+	var getConnDuration time.Duration
+	var rpcDuration time.Duration
+	var resultErr error
+	retCode := int32(-1)
+	defer func() {
+		log.G(ctx).Infof(
+			"cubemaster timing cubelet.Create rpc: request_id=%s endpoint=%s get_conn_ms=%.3f grpc_create_ms=%.3f total_ms=%.3f ret_code=%d err=%v",
+			req.GetRequestID(),
+			calleeEp,
+			durationMillis(getConnDuration),
+			durationMillis(rpcDuration),
+			durationMillis(time.Since(totalStart)),
+			retCode,
+			resultErr,
+		)
+	}()
+	stageStart := time.Now()
 	conn, err := grpcconn.GetWorkerConn(ctx, calleeEp)
+	getConnDuration = time.Since(stageStart)
 	if err != nil {
-		return nil, ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+		resultErr = ret.Err(errorcode.ErrorCode_ConnHostFailed, err.Error())
+		return nil, resultErr
 	}
 	defer conn.Close()
 	c := cubebox.NewCubeboxMgrClient(conn.Value())
 
-	return c.Create(ctx, req)
+	stageStart = time.Now()
+	rsp, err := c.Create(ctx, req)
+	rpcDuration = time.Since(stageStart)
+	if rsp != nil && rsp.GetRet() != nil {
+		retCode = int32(rsp.GetRet().GetRetCode())
+	}
+	resultErr = err
+	return rsp, err
 }
 
 func AppSnapshot(ctx context.Context, calleeEp string,

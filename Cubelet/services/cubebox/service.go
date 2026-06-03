@@ -214,25 +214,65 @@ func safePrint(req *cubebox.RunCubeSandboxRequest) string {
 	return utils.InterfaceToString(tmpReq)
 }
 func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest) (*cubebox.RunCubeSandboxResponse, error) {
+	totalStart := time.Now()
+	var checkParamDuration time.Duration
+	var defaultsDuration time.Duration
+	var setupContextDuration time.Duration
+	var setResourceDuration time.Duration
+	var runtimeLookupDuration time.Duration
+	var engineDuration time.Duration
+	var responseDuration time.Duration
+	var resultErr error
 	rsp := &cubebox.RunCubeSandboxResponse{
 		RequestID: req.RequestID,
 		Ret:       &errorcode.Ret{RetCode: errorcode.ErrorCode_Success},
 		ExtInfo:   map[string][]byte{},
 	}
+	defer func() {
+		retCode := int32(-1)
+		retMsg := ""
+		if rsp != nil && rsp.GetRet() != nil {
+			retCode = int32(rsp.GetRet().GetRetCode())
+			retMsg = rsp.GetRet().GetRetMsg()
+		}
+		log.G(ctx).Infof(
+			"cubelet timing service.Create: request_id=%s sandbox_id=%s instance_type=%s check_param_ms=%.3f defaults_ms=%.3f setup_context_ms=%.3f set_resource_ms=%.3f runtime_lookup_ms=%.3f engine_ms=%.3f response_ms=%.3f total_ms=%.3f ret_code=%d ret_msg=%s err=%v",
+			req.GetRequestID(),
+			rsp.GetSandboxID(),
+			req.GetInstanceType(),
+			durationMillis(checkParamDuration),
+			durationMillis(defaultsDuration),
+			durationMillis(setupContextDuration),
+			durationMillis(setResourceDuration),
+			durationMillis(runtimeLookupDuration),
+			durationMillis(engineDuration),
+			durationMillis(responseDuration),
+			durationMillis(time.Since(totalStart)),
+			retCode,
+			retMsg,
+			resultErr,
+		)
+	}()
 
+	stageStart := time.Now()
 	if err := checkParam(ctx, req); err != nil {
+		checkParamDuration = time.Since(stageStart)
 		rerr, _ := ret.FromError(err)
 		rsp.Ret.RetMsg = rerr.Message()
 		rsp.Ret.RetCode = rerr.Code()
 		return rsp, nil
 	}
+	checkParamDuration = time.Since(stageStart)
+	stageStart = time.Now()
 	SetRunCubeSandboxRequestDefaultValue(req)
+	defaultsDuration = time.Since(stageStart)
 
 	start := time.Now()
 	createInfo := &workflow.CreateContext{
 		ReqInfo:  req,
 		Failover: true,
 	}
+	stageStart = time.Now()
 	ctx = setDefaultContext(ctx, req, createInfo)
 
 	ctx = context.WithValue(ctx, workflow.KCreateContext, createInfo)
@@ -249,13 +289,16 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		Qualifier:    getUserAgent(ctx),
 	}
 	ctx = CubeLog.WithRequestTrace(ctx, rt)
+	setupContextDuration = time.Since(stageStart)
 	if log.IsDebug() {
 		log.G(ctx).Debugf("RunCubeSandboxRequest:%s", utils.InterfaceToString(req))
 	} else {
 		log.G(ctx).Errorf("RunCubeSandboxRequest:%s", safePrint(req))
 	}
 
+	stageStart = time.Now()
 	s.setRequestResource(createInfo, req)
+	setResourceDuration = time.Since(stageStart)
 
 	defer func() {
 		cost := time.Since(start)
@@ -281,14 +324,18 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	})
 
 	defer func() {
+		responseStart := time.Now()
 		rsp.SandboxID = createInfo.SandboxID
 		rsp.SandboxIP = getSandboxIp(createInfo)
 		rsp.PortMappings = getAllocatedPort(createInfo)
 
 		setCubeExtKey(rsp, createInfo)
+		responseDuration = time.Since(responseStart)
 	}()
 
+	stageStart = time.Now()
 	or, e := s.cubeboxMgr.getSandboxRuntime(req)
+	runtimeLookupDuration = time.Since(stageStart)
 	if e != nil {
 		log.G(ctx).Errorf("getSandboxRuntime fail:%s", e.Error())
 		rsp.Ret.RetMsg = e.Error()
@@ -304,6 +351,7 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 	ctx = namespaces.WithNamespace(ctx, ns)
 	ctx = workflow.WithCreateContext(ctx, createInfo)
 	var createErr error
+	stageStart = time.Now()
 	if constants.IsCubeRuntime(ctx) {
 		createErr = s.engine.Create(ctx, createInfo)
 	} else {
@@ -311,6 +359,8 @@ func (s *service) Create(ctx context.Context, req *cubebox.RunCubeSandboxRequest
 		createInfo.SandboxID = utils.GenerateID()
 		createErr = s.otherRuntime.Create(ctx, createInfo)
 	}
+	engineDuration = time.Since(stageStart)
+	resultErr = createErr
 
 	err, _ := ret.FromError(createErr)
 	rsp.Ret.RetMsg = err.Message()

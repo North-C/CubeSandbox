@@ -275,12 +275,12 @@ type Config struct {
 
 	RootPath string `toml:"root_path"`
 
-	EnableNetworkAgent          bool             `toml:"enable_network_agent"`
-	NetworkAgentEndpoint        string           `toml:"network_agent_endpoint"`
-	NetworkAgentTapSocket       string           `toml:"network_agent_tap_socket"`
-	NetworkAgentInitTimeout     tomlext.Duration `toml:"network_agent_init_timeout"`
-	NetworkAgentRetryInterval   tomlext.Duration `toml:"network_agent_retry_interval"`
-	NetworkAgentTapFDTimeout    tomlext.Duration `toml:"network_agent_tap_fd_timeout"`
+	EnableNetworkAgent        bool             `toml:"enable_network_agent"`
+	NetworkAgentEndpoint      string           `toml:"network_agent_endpoint"`
+	NetworkAgentTapSocket     string           `toml:"network_agent_tap_socket"`
+	NetworkAgentInitTimeout   tomlext.Duration `toml:"network_agent_init_timeout"`
+	NetworkAgentRetryInterval tomlext.Duration `toml:"network_agent_retry_interval"`
+	NetworkAgentTapFDTimeout  tomlext.Duration `toml:"network_agent_tap_fd_timeout"`
 
 	ReconcileInterval tomlext.Duration `toml:"reconcile_interval"`
 }
@@ -462,8 +462,27 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	log.G(ctx).Infof("tap create ensure request: sandbox_id=%s interfaces=%d routes=%d arps=%d port_mappings=%d resolved_dns_servers=%v dns_allow_out_cidrs=%v cubevs_context=%s persist_metadata=%s",
 		ensureReq.SandboxID, len(ensureReq.Interfaces), len(ensureReq.Routes), len(ensureReq.ARPNeighbors),
 		len(ensureReq.PortMappings), resolvedDNSServers, dnsAllowOutCIDRs, formatNetworkAgentCubeVSContext(ensureReq.CubeVSContext), utils.InterfaceToString(ensureReq.PersistMetadata))
+	networkAgentStart := time.Now()
+	var ensureNetworkDuration time.Duration
+	var buildShimDuration time.Duration
+	var registerFDPoolDuration time.Duration
+	var networkAgentTimingErr error
+	defer func() {
+		log.G(ctx).Infof(
+			"tap create timing network-agent: sandbox_id=%s ensure_rpc_ms=%.3f build_shim_ms=%.3f register_fd_pool_ms=%.3f total_ms=%.3f err=%v",
+			opts.SandboxID,
+			durationMillis(ensureNetworkDuration),
+			durationMillis(buildShimDuration),
+			durationMillis(registerFDPoolDuration),
+			durationMillis(time.Since(networkAgentStart)),
+			networkAgentTimingErr,
+		)
+	}()
+	stageStart := time.Now()
 	ensureResp, naErr := l.networkAgentClient.EnsureNetwork(ctx, ensureReq)
+	ensureNetworkDuration = time.Since(stageStart)
 	if naErr != nil {
+		networkAgentTimingErr = naErr
 		l.recordNetworkAgentFailure(naErr)
 		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "network-agent EnsureNetwork failed: %s", classifyNetworkAgentError(naErr))
 	}
@@ -490,13 +509,20 @@ func (l *local) Create(ctx context.Context, opts *workflow.CreateContext) (err e
 	log.G(ctx).Infof("tap create ensure response: sandbox_id=%s network_handle=%s interfaces=%d routes=%d arps=%d port_mappings=%d persist_metadata=%s",
 		ensureResp.SandboxID, ensureResp.NetworkHandle, len(ensureResp.Interfaces), len(ensureResp.Routes),
 		len(ensureResp.ARPNeighbors), len(ensureResp.PortMappings), utils.InterfaceToString(ensureResp.PersistMetadata))
+	stageStart = time.Now()
 	shimReq, err := l.buildShimNetReqFromEnsureResponse(ensureResp, req)
+	buildShimDuration = time.Since(stageStart)
 	if err != nil {
+		networkAgentTimingErr = err
 		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "build shim req from network-agent response failed: %+v", err)
 	}
-	if err := l.registerNetworkAgentTapForPool(ctx, opts.SandboxID, shimReq); err != nil {
-		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "register network-agent tap for pool failed: %+v", err)
+	stageStart = time.Now()
+	if regErr := l.registerNetworkAgentTapForPool(ctx, opts.SandboxID, shimReq); regErr != nil {
+		registerFDPoolDuration = time.Since(stageStart)
+		networkAgentTimingErr = regErr
+		return ret.Errorf(errorcode.ErrorCode_CreateNetworkFailed, "register network-agent tap for pool failed: %+v", regErr)
 	}
+	registerFDPoolDuration = time.Since(stageStart)
 	if len(shimReq.Interfaces) > 0 {
 		intf := shimReq.Interfaces[0]
 		log.G(ctx).Infof("tap create shim net from network-agent: sandbox_id=%s host_tap=%s sandbox_ip=%s guest_ip=%s mtu=%d queues=%d port_mappings=%v",
@@ -970,25 +996,56 @@ func (l *local) delNet(mvmNet *MvmNet) {
 }
 
 func (l *local) registerNetworkAgentTapForPool(ctx context.Context, sandboxID string, shimReq *ShimNetReq) error {
+	totalStart := time.Now()
+	var requestFDTime time.Duration
+	var linkByNameTime time.Duration
+	var storeTime time.Duration
+	var resultErr error
+	tapName := ""
+	var fd uintptr
+	defer func() {
+		log.G(ctx).Infof(
+			"tap create timing register fd pool: sandbox_id=%s tap_name=%s fd=%d request_tap_fd_ms=%.3f link_by_name_ms=%.3f store_ms=%.3f total_ms=%.3f err=%v",
+			sandboxID,
+			tapName,
+			fd,
+			durationMillis(requestFDTime),
+			durationMillis(linkByNameTime),
+			durationMillis(storeTime),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	if shimReq == nil || len(shimReq.Interfaces) == 0 {
-		return fmt.Errorf("shim network interfaces are empty")
+		resultErr = fmt.Errorf("shim network interfaces are empty")
+		return resultErr
 	}
 	intf := shimReq.Interfaces[0]
+	tapName = intf.Name
 	if intf.Name == "" {
-		return fmt.Errorf("shim network tap name is empty")
+		resultErr = fmt.Errorf("shim network tap name is empty")
+		return resultErr
 	}
 	if intf.IPAddr == nil {
-		return fmt.Errorf("shim network sandbox ip is empty")
+		resultErr = fmt.Errorf("shim network sandbox ip is empty")
+		return resultErr
 	}
 	tapFDTimeout := time.Duration(l.Config.NetworkAgentTapFDTimeout)
+	stageStart := time.Now()
 	file, err := requestNetworkAgentTapFile(l.Config.NetworkAgentTapSocket, sandboxID, intf.Name, tapFDTimeout)
+	requestFDTime = time.Since(stageStart)
 	if err != nil {
-		return fmt.Errorf("request original tap fd for %s: %w", intf.Name, err)
+		resultErr = fmt.Errorf("request original tap fd for %s: %w", intf.Name, err)
+		return resultErr
 	}
+	fd = file.Fd()
+	stageStart = time.Now()
 	link, err := netlink.LinkByName(intf.Name)
+	linkByNameTime = time.Since(stageStart)
 	if err != nil {
 		_ = file.Close()
-		return fmt.Errorf("lookup tap link %s: %w", intf.Name, err)
+		resultErr = fmt.Errorf("lookup tap link %s: %w", intf.Name, err)
+		return resultErr
 	}
 	tap := &Tap{
 		Index: link.Attrs().Index,
@@ -998,6 +1055,7 @@ func (l *local) registerNetworkAgentTapForPool(ctx context.Context, sandboxID st
 	}
 	tap.SetPortMappings(shimReq.PortMappings)
 
+	stageStart = time.Now()
 	if old := l.loadNet(sandboxID); old != nil {
 		l.delNet(old)
 		if old.Tap != nil && old.Tap.File != nil && old.Tap.File != file {
@@ -1010,6 +1068,7 @@ func (l *local) registerNetworkAgentTapForPool(ctx context.Context, sandboxID st
 		Tap: tap,
 	}
 	l.storeNet(mvmNet)
+	storeTime = time.Since(stageStart)
 	log.G(ctx).Infof("registered network-agent tap for fd pool: sandbox_id=%s tap_name=%s ifindex=%d fd=%d sandbox_ip=%s port_mappings=%v",
 		sandboxID, tap.Name, tap.Index, tap.File.Fd(), tap.IP.String(), shimReq.PortMappings)
 	return nil

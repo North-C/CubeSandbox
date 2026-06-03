@@ -136,7 +136,10 @@ fn build_cluster_routes(state: &AppState, auth_configured: bool) -> Router<AppSt
         .route("/nodes/:nodeID", get(cluster::get_node))
         .route("/config", get(config::get_config))
         .route("/store/meta", get(store::get_store_meta))
-        .route("/store/refresh", axum::routing::post(store::refresh_store_meta));
+        .route(
+            "/store/refresh",
+            axum::routing::post(store::refresh_store_meta),
+        );
 
     with_auth(routes, state, auth_configured)
 }

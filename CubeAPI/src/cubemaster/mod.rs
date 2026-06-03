@@ -55,7 +55,9 @@ impl CubeMasterClient {
         &self,
         req: &CreateSandboxRequest,
     ) -> Result<CreateSandboxResponse, CubeMasterError> {
+        let total_start = std::time::Instant::now();
         let url = format!("{}/cube/sandbox", self.base_url);
+        let send_start = std::time::Instant::now();
         let resp = self
             .inner
             .post(&url)
@@ -63,7 +65,34 @@ impl CubeMasterClient {
             .send()
             .await
             .map_err(CubeMasterError::Http)?;
-        parse_response(resp).await
+        let send_ms = send_start.elapsed().as_secs_f64() * 1000.0;
+        let parse_start = std::time::Instant::now();
+        let parsed = parse_response::<CreateSandboxResponse>(resp).await;
+        let parse_ms = parse_start.elapsed().as_secs_f64() * 1000.0;
+        match &parsed {
+            Ok(rsp) => {
+                tracing::info!(
+                    request_id = %req.request_id,
+                    sandbox_id = %rsp.sandbox_id,
+                    ret_code = rsp.ret.ret_code,
+                    send_ms = send_ms,
+                    parse_ms = parse_ms,
+                    total_ms = total_start.elapsed().as_secs_f64() * 1000.0,
+                    "cubeapi timing cubemaster.create_sandbox"
+                );
+            }
+            Err(err) => {
+                tracing::info!(
+                    request_id = %req.request_id,
+                    send_ms = send_ms,
+                    parse_ms = parse_ms,
+                    total_ms = total_start.elapsed().as_secs_f64() * 1000.0,
+                    error = %err,
+                    "cubeapi timing cubemaster.create_sandbox"
+                );
+            }
+        }
+        parsed
     }
 
     /// DELETE /cube/sandbox — destroy a sandbox.
@@ -1291,7 +1320,10 @@ pub struct CreateTemplateEnv {
 /// CubeVS context for template creation.
 #[derive(Debug, Serialize)]
 pub struct CreateTemplateCubeVSContext {
-    #[serde(rename = "allowInternetAccess", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "allowInternetAccess",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub allow_internet_access: Option<bool>,
 }
 

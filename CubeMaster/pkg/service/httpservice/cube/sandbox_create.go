@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/api/services/cubebox/v1"
 	"github.com/tencentcloud/CubeSandbox/CubeMaster/pkg/base/constants"
@@ -27,6 +28,27 @@ var (
 
 func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTrace) interface{} {
 	_ = w
+	totalStart := time.Now()
+	var constructReqDuration time.Duration
+	var templateDuration time.Duration
+	var affinityDuration time.Duration
+	var createDuration time.Duration
+	var requestID string
+	var instanceType string
+	var retCode int64 = -1
+	defer func() {
+		log.G(r.Context()).Infof(
+			"cubemaster timing createSandbox http: request_id=%s instance_type=%s construct_req_ms=%.3f template_merge_ms=%.3f affinity_ms=%.3f create_sandbox_ms=%.3f total_ms=%.3f ret_code=%d",
+			requestID,
+			instanceType,
+			durationMillis(constructReqDuration),
+			durationMillis(templateDuration),
+			durationMillis(affinityDuration),
+			durationMillis(createDuration),
+			durationMillis(time.Since(totalStart)),
+			retCode,
+		)
+	}()
 	rt.RetCode = -1
 	rsp := &types.Res{
 		Ret: &types.Ret{
@@ -35,13 +57,18 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		},
 	}
 
+	stageStart := time.Now()
 	req, err := constructCreateReq(r)
+	constructReqDuration = time.Since(stageStart)
 	if err != nil {
 		rsp.Ret.RetCode = int(errorcode.ErrorCode_MasterParamsError)
 		rsp.Ret.RetMsg = err.Error()
 		rt.RetCode = int64(errorcode.ErrorCode_MasterParamsError)
+		retCode = rt.RetCode
 		return rsp
 	}
+	requestID = req.RequestID
+	instanceType = req.InstanceType
 	rsp.RequestID = req.RequestID
 	rt.RequestID = req.RequestID
 	rt.InstanceType = req.InstanceType
@@ -50,21 +77,30 @@ func createSandbox(w http.ResponseWriter, r *http.Request, rt *CubeLog.RequestTr
 		"InstanceType": req.InstanceType,
 	}))
 
+	stageStart = time.Now()
 	if err := createSandboxDealCubeboxCreateReqWithTemplateFn(ctx, req); err != nil {
-		retCode := errorcode.ErrorCode_MasterParamsError
+		templateDuration = time.Since(stageStart)
+		templateRetCode := errorcode.ErrorCode_MasterParamsError
 		if errors.Is(err, templatecenter.ErrTemplateNotFound) {
-			retCode = errorcode.ErrorCode_NotFound
+			templateRetCode = errorcode.ErrorCode_NotFound
 		}
-		rsp.Ret.RetCode = int(retCode)
+		rsp.Ret.RetCode = int(templateRetCode)
 		rsp.Ret.RetMsg = err.Error()
-		rt.RetCode = int64(retCode)
+		rt.RetCode = int64(templateRetCode)
+		retCode = rt.RetCode
 		log.G(ctx).Error(err)
 		return rsp
 	}
+	templateDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	ctx = runInsReq2Affinity(ctx, req)
+	affinityDuration = time.Since(stageStart)
+	stageStart = time.Now()
 	ret := createSandboxRunFn(ctx, req)
+	createDuration = time.Since(stageStart)
 	rt.RetCode = int64(ret.Ret.RetCode)
+	retCode = rt.RetCode
 	return ret
 }
 

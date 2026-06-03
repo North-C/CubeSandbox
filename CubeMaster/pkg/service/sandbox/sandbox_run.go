@@ -44,11 +44,19 @@ type createSandboxContext struct {
 	cubeletStartTime time.Time
 	cubeletEndTime   time.Time
 	startHandleTime  time.Time
+	waitStartTime    time.Time
 
 	retryCost time.Duration
 	ctx       context.Context
 	done      chan struct{}
 	cancel    context.CancelFunc
+
+	newContextDuration        time.Duration
+	bufferQueueWaitDuration   time.Duration
+	lastScheduleDuration      time.Duration
+	lastCubeletCallDuration   time.Duration
+	lastDealSuccDuration      time.Duration
+	lastSetProxyRedisDuration time.Duration
 
 	setMasterRspOnce sync.Once
 	hasSetRet        bool
@@ -111,11 +119,14 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 		return
 	}
 
+	stageStart := time.Now()
 	if err := createCtx.newContext(ctx, req); err != nil {
+		createCtx.newContextDuration = time.Since(stageStart)
 		err, _ := ret.FromError(err)
 		createCtx.setMasterRsp(int(err.Code()), err.Message())
 		return
 	}
+	createCtx.newContextDuration = time.Since(stageStart)
 
 	if config.GetConfig().Common.MockCreateDirectHandle {
 		createCtx.Handle()
@@ -123,8 +134,30 @@ func CreateSandbox(ctx context.Context, req *types.CreateCubeSandboxReq) (rsp *t
 
 		scheduler.AddBufferTask(createCtx, req.InstanceType)
 	}
+	createCtx.waitStartTime = time.Now()
 	createCtx.Wait()
 	createCtx.endTime = time.Now()
+
+	handleTotalDuration := time.Duration(0)
+	if !createCtx.startHandleTime.IsZero() {
+		handleTotalDuration = createCtx.endTime.Sub(createCtx.startHandleTime)
+	}
+	log.G(ctx).Infof(
+		"cubemaster timing CreateSandbox: request_id=%s sandbox_id=%s instance_type=%s new_context_ms=%.3f buffer_wait_ms=%.3f handle_total_ms=%.3f schedule_ms=%.3f cubelet_call_ms=%.3f deal_success_ms=%.3f set_proxy_redis_ms=%.3f total_ms=%.3f retries=%d ret_code=%d",
+		req.RequestID,
+		rsp.SandboxID,
+		req.InstanceType,
+		durationMillis(createCtx.newContextDuration),
+		durationMillis(createCtx.bufferQueueWaitDuration),
+		durationMillis(handleTotalDuration),
+		durationMillis(createCtx.lastScheduleDuration),
+		durationMillis(createCtx.lastCubeletCallDuration),
+		durationMillis(createCtx.lastDealSuccDuration),
+		durationMillis(createCtx.lastSetProxyRedisDuration),
+		durationMillis(createCtx.endTime.Sub(startTime)),
+		createCtx.retryTimes,
+		rsp.Ret.RetCode,
+	)
 
 	go createCtx.dealMetric()
 	return
@@ -146,6 +179,9 @@ func (c *createSandboxContext) Wait() {
 
 func (c *createSandboxContext) Handle() {
 	c.startHandleTime = time.Now()
+	if !c.waitStartTime.IsZero() {
+		c.bufferQueueWaitDuration = c.startHandleTime.Sub(c.waitStartTime)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			log.G(c.ctx).Fatalf("Handle panic:%+v", string(debug.Stack()))
@@ -171,11 +207,14 @@ func (c *createSandboxContext) handleCubelet() {
 		default:
 		}
 
+		stageStart := time.Now()
 		if er := c.schedule(); er != nil {
+			c.lastScheduleDuration = time.Since(stageStart)
 			err, _ := ret.FromError(er)
 			c.setMasterRsp(int(err.Code()), err.Message())
 			return
 		}
+		c.lastScheduleDuration = time.Since(stageStart)
 		if c.selectHost.HostIP() == "" {
 			c.setMasterRsp(int(errorcode.ErrorCode_DBError), "HostIP is empty")
 			return
@@ -213,6 +252,24 @@ func (c *createSandboxContext) callCubelet() bool {
 	calleeEndpoint := cubelet.GetCubeletAddr(c.selectHost.HostIP())
 	c.cubeletStartTime = time.Now()
 	c.cubeletRsp, err = cubelet.Create(c.ctx, calleeEndpoint, c.cubeletReq)
+	c.lastCubeletCallDuration = time.Since(c.cubeletStartTime)
+	retCode := int32(-1)
+	retMsg := ""
+	if c.cubeletRsp != nil && c.cubeletRsp.GetRet() != nil {
+		retCode = int32(c.cubeletRsp.GetRet().GetRetCode())
+		retMsg = c.cubeletRsp.GetRet().GetRetMsg()
+	}
+	log.G(c.ctx).Infof(
+		"cubemaster timing callCubelet: request_id=%s host_ip=%s endpoint=%s duration_ms=%.3f retry_times=%d ret_code=%d ret_msg=%s err=%v",
+		c.cubeletReq.GetRequestID(),
+		c.selectHost.HostIP(),
+		calleeEndpoint,
+		durationMillis(c.lastCubeletCallDuration),
+		c.retryTimes,
+		retCode,
+		retMsg,
+		err,
+	)
 	if err != nil {
 		return c.errRetry(err)
 	}
@@ -220,6 +277,10 @@ func (c *createSandboxContext) callCubelet() bool {
 }
 
 func (c *createSandboxContext) dealSuccResult() {
+	stageStart := time.Now()
+	defer func() {
+		c.lastDealSuccDuration = time.Since(stageStart)
+	}()
 	if c.cubeletRsp.GetRet().GetRetCode() == cubeleterrorcode.ErrorCode_Success {
 		c.masterRsp.SandboxID = c.cubeletRsp.GetSandboxID()
 		c.masterRsp.SandboxIP = c.cubeletRsp.GetSandboxIP()
@@ -244,9 +305,12 @@ func (c *createSandboxContext) dealSuccResult() {
 				log.G(c.ctx).Warnf("no port mapping in response")
 			}
 		}
+		redisStart := time.Now()
 		if err := c.setProxyToRedis(); err != nil {
+			c.lastSetProxyRedisDuration = time.Since(redisStart)
 			c.setMasterRsp(int(errorcode.ErrorCode_DBError), fmt.Sprintf("setProxyToRedis fail:%s", err))
 		}
+		c.lastSetProxyRedisDuration = time.Since(redisStart)
 
 		c.setMasterRsp(int(c.cubeletRsp.GetRet().GetRetCode()), c.cubeletRsp.GetRet().GetRetMsg())
 	}
@@ -456,10 +520,33 @@ func (c *createSandboxContext) setProxyToRedis() error {
 }
 
 func (c *createSandboxContext) newContext(ctx context.Context, req *types.CreateCubeSandboxReq) error {
+	totalStart := time.Now()
+	var constructAffinityDuration time.Duration
+	var constructCubeletReqDuration time.Duration
+	var reqResourceDuration time.Duration
+	var contextTimeoutDuration time.Duration
+	var directHostDuration time.Duration
+	var resultErr error
+	defer func() {
+		log.G(ctx).Infof(
+			"cubemaster timing newContext: request_id=%s instance_type=%s construct_affinity_ms=%.3f construct_cubelet_req_ms=%.3f req_resource_ms=%.3f context_timeout_ms=%.3f direct_host_ms=%.3f total_ms=%.3f err=%v",
+			req.RequestID,
+			req.InstanceType,
+			durationMillis(constructAffinityDuration),
+			durationMillis(constructCubeletReqDuration),
+			durationMillis(reqResourceDuration),
+			durationMillis(contextTimeoutDuration),
+			durationMillis(directHostDuration),
+			durationMillis(time.Since(totalStart)),
+			resultErr,
+		)
+	}()
 	c.selctx = selctx.New(config.GetConfig().Scheduler.LeastSelectName)
 	c.selctx.InstanceType = req.InstanceType
 
+	stageStart := time.Now()
 	c.constructAffanity(ctx, req)
+	constructAffinityDuration = time.Since(stageStart)
 	c.done = make(chan struct{})
 	c.cubeletRsp = &cubebox.RunCubeSandboxResponse{
 		Ret: &cubeleterrorcode.Ret{
@@ -467,45 +554,61 @@ func (c *createSandboxContext) newContext(ctx context.Context, req *types.Create
 		},
 	}
 
+	stageStart = time.Now()
 	cubeletReq, err := ConstructCubeletReq(ctx, req)
 	if err != nil {
-		return err
+		constructCubeletReqDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
+	constructCubeletReqDuration = time.Since(stageStart)
 	c.cubeletReq = cubeletReq
 
+	stageStart = time.Now()
 	reqResource, err := checkAndGetReqResource(req)
 	if err != nil {
-		return err
+		reqResourceDuration = time.Since(stageStart)
+		resultErr = err
+		return resultErr
 	}
+	reqResourceDuration = time.Since(stageStart)
 	c.selctx.ReqRes = reqResource
 
+	stageStart = time.Now()
 	c.ctx, c.cancel = context.WithTimeout(ctx, time.Duration(req.Timeout)*time.Second)
 	c.selctx.Ctx = c.ctx
+	contextTimeoutDuration = time.Since(stageStart)
 
+	stageStart = time.Now()
 	switch {
 	case req.InsId != "":
 		if !isDebug(req.Annotations) {
-			return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "invalid debug req:%s", req.InsId)
+			resultErr = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "invalid debug req:%s", req.InsId)
+			return resultErr
 		}
 		tmpResult, exist := localcache.GetNode(req.InsId)
 		if !exist {
-			return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "no such insId:%s", req.InsId)
+			resultErr = ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "no such insId:%s", req.InsId)
+			return resultErr
 		}
 		c.selectHost = tmpResult
 		c.directHost = true
 	case req.InsIp != "":
 		if !isDebug(req.Annotations) {
-			return ret.Errorf(errorcode.ErrorCode_MasterParamsError, "invalid debug req:%s", req.InsIp)
+			resultErr = ret.Errorf(errorcode.ErrorCode_MasterParamsError, "invalid debug req:%s", req.InsIp)
+			return resultErr
 		}
 		tmpResult, exist := localcache.GetNodesByIp(req.InsIp)
 		if !exist {
-			return ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "no such InsIp:%s", req.InsIp)
+			resultErr = ret.Errorf(errorcode.ErrorCode_SelectNodesFailed, "no such InsIp:%s", req.InsIp)
+			return resultErr
 		}
 		c.selectHost = tmpResult
 		c.directHost = true
 	default:
 
 	}
+	directHostDuration = time.Since(stageStart)
 	return nil
 }
 func (c *createSandboxContext) constructAffanity(ctx context.Context, req *types.CreateCubeSandboxReq) {

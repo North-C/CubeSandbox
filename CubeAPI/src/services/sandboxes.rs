@@ -9,10 +9,10 @@ use uuid::Uuid;
 use crate::{
     constants::ENVD_VERSION,
     cubemaster::{
-        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient, CubeMasterError,
-        CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo, SandboxLogsRequest,
-        SandboxRefreshRequest, SandboxSnapshotRequest, SandboxStatus, SandboxTimeoutRequest,
-        SandboxUpdateRequest,
+        datetime_from_unix_nanos, extract_template_id, CreateSandboxRequest, CubeMasterClient,
+        CubeMasterError, CubeVSContext, DeleteSandboxRequest, ListSandboxRequest, SandboxInfo,
+        SandboxLogsRequest, SandboxRefreshRequest, SandboxSnapshotRequest, SandboxStatus,
+        SandboxTimeoutRequest, SandboxUpdateRequest,
     },
     error::{AppError, AppResult},
     models::{
@@ -114,7 +114,9 @@ impl SandboxService {
     }
 
     pub async fn create_sandbox(&self, body: NewSandbox) -> AppResult<Sandbox> {
+        let total_start = std::time::Instant::now();
         let template_id = body.template_id.clone();
+        let build_req_start = std::time::Instant::now();
         let mut annotations = HashMap::from([
             (
                 "cube.master.appsnapshot.template.id".to_string(),
@@ -145,16 +147,31 @@ impl SandboxService {
             network_type: Some("tap".to_string()),
             cubevs_context: build_cubevs_context(body.allow_internet_access, body.network.as_ref()),
         };
+        let build_req_ms = build_req_start.elapsed().as_secs_f64() * 1000.0;
 
+        let cubemaster_start = std::time::Instant::now();
         let resp = self
             .cubemaster
             .create_sandbox(&req)
             .await
             .map_err(internal_error)?;
+        let cubemaster_ms = cubemaster_start.elapsed().as_secs_f64() * 1000.0;
 
         resp.ret.into_result().map_err(internal_error)?;
 
-        Ok(self.sandbox_response(template_id, resp.sandbox_id, resp.request_id))
+        let response_start = std::time::Instant::now();
+        let sandbox = self.sandbox_response(template_id, resp.sandbox_id, resp.request_id);
+        let response_ms = response_start.elapsed().as_secs_f64() * 1000.0;
+        tracing::info!(
+            request_id = %sandbox.client_id,
+            sandbox_id = %sandbox.sandbox_id,
+            build_req_ms = build_req_ms,
+            cubemaster_ms = cubemaster_ms,
+            response_ms = response_ms,
+            total_ms = total_start.elapsed().as_secs_f64() * 1000.0,
+            "cubeapi timing create_sandbox service"
+        );
+        Ok(sandbox)
     }
 
     pub async fn kill_sandbox(&self, sandbox_id: &str) -> AppResult<()> {
@@ -562,7 +579,8 @@ pub(crate) fn from_cubemaster_info(s: SandboxInfo) -> crate::models::ListedSandb
     let template_id = extract_template_id(&s.template_id, &s.annotations, &s.labels);
 
     // Prefer explicit started_at; fall back to create_at (Unix nanos from Cubelet); last resort: now
-    let started_at = s.started_at
+    let started_at = s
+        .started_at
         .or_else(|| datetime_from_unix_nanos(s.create_at))
         .unwrap_or(now);
 

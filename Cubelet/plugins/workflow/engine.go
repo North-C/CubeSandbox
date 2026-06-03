@@ -334,22 +334,44 @@ func (e *Engine) AddFlow(k string, f *Workflow) {
 func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 	if flow, ok := e.workflows[do]; ok {
 
+		totalStart := time.Now()
 		start := time.Now()
 		if !flow.Limiter.TryAcquire() {
 			return ret.Errorf(errorcode.ErrorCode_ConcurrentFailed, "flow [%s] exceed limited", flow.ID())
 		}
+		limiterWait := time.Since(start)
 		if flow_create == do {
 			rOpts := opts.(*CreateContext)
-			rOpts.AddMetric(nil, constants.LimiterId, time.Since(start))
+			rOpts.AddMetric(nil, constants.LimiterId, limiterWait)
 		} else if flow_destroy == do {
 			rOpts := opts.(*DestroyContext)
-			rOpts.AddMetric(nil, constants.LimiterId, time.Since(start))
+			rOpts.AddMetric(nil, constants.LimiterId, limiterWait)
 		}
 
-		defer flow.Limiter.Release()
+		var resultErr error
+		defer func() {
+			flow.Limiter.Release()
+			sandboxID := ""
+			instanceType := ""
+			if opts != nil {
+				sandboxID = opts.GetSandboxID()
+				instanceType = opts.GetInstanceType()
+			}
+			log.G(ctx).Infof(
+				"workflow timing run: flow=%s sandbox_id=%s instance_type=%s limiter_wait_ms=%.3f total_ms=%.3f err=%v",
+				do,
+				sandboxID,
+				instanceType,
+				durationMillis(limiterWait),
+				durationMillis(time.Since(totalStart)),
+				resultErr,
+			)
+		}()
 
 		for _, step := range flow.Steps {
+			stepStart := time.Now()
 			if err := e.parallelRunSteps(do, ctx, opts, step); err != nil {
+				resultErr = err
 
 				if ret.IsErrorCode(err, errorcode.ErrorCode_PreConditionFailed) {
 					return err
@@ -368,10 +390,23 @@ func (e *Engine) run(do string, ctx context.Context, opts ReqContext) error {
 
 				return err
 			}
+			sandboxID := ""
+			if opts != nil {
+				sandboxID = opts.GetSandboxID()
+			}
+			log.G(ctx).Infof(
+				"workflow timing step: flow=%s step=%s sandbox_id=%s actions=%d duration_ms=%.3f",
+				do,
+				step.ID(),
+				sandboxID,
+				len(step.Actions),
+				durationMillis(time.Since(stepStart)),
+			)
 			select {
 			case <-ctx.Done():
 
 				if ctx.Err() == context.Canceled || ctx.Err() == context.DeadlineExceeded {
+					resultErr = ctx.Err()
 					if flow_create == do {
 						rOpts := opts.(*CreateContext)
 						if rOpts.Failover {
@@ -458,6 +493,22 @@ func (e *Engine) parallelRunSteps(do string, ctx context.Context, opts ReqContex
 			default:
 				err = fmt.Errorf("unknown")
 			}
+			sandboxID := ""
+			instanceType := ""
+			if opts != nil {
+				sandboxID = opts.GetSandboxID()
+				instanceType = opts.GetInstanceType()
+			}
+			log.G(ctxTmp).Infof(
+				"workflow timing action: flow=%s step=%s action=%s sandbox_id=%s instance_type=%s duration_ms=%.3f err=%v",
+				do,
+				step.ID(),
+				flow.ID(),
+				sandboxID,
+				instanceType,
+				durationMillis(time.Since(start)),
+				err,
+			)
 			if err != nil {
 
 				CubeLog.WithContext(ctxTmp).Errorf("[%v] fail:%v %v", flow.ID(), ret.FetchErrorCode(err), err)
