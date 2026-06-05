@@ -8,16 +8,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
 require_root
-if ! is_compute_role; then
-  exit 0
-fi
 
 require_cmd rg
 require_cmd sed
 
 CUBELET_DYNAMICCONF="${TOOLBOX_ROOT}/Cubelet/dynamicconf/conf.yaml"
 ensure_file "${CUBELET_DYNAMICCONF}"
-[[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
+if is_compute_role; then
+  [[ -n "${CUBE_SANDBOX_NODE_IP:-}" ]] || die "CUBE_SANDBOX_NODE_IP is required for compute role"
+fi
 
 CONTROL_PLANE_ADDR="$(resolve_control_plane_cubemaster_addr)"
 rg -q "meta_server_endpoint:" "${CUBELET_DYNAMICCONF}" || die "meta_server_endpoint missing in ${CUBELET_DYNAMICCONF}"
