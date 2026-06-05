@@ -28,8 +28,6 @@ pub const MSIX_TABLE_ENTRY_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Failed enabling the interrupt route.
-    EnableInterruptRoute(io::Error),
     /// Failed updating the interrupt route.
     UpdateInterruptRoute(io::Error),
 }
@@ -140,10 +138,6 @@ impl MsixConfig {
                 self.interrupt_source_group
                     .update_many(&configs)
                     .map_err(Error::UpdateInterruptRoute)?;
-
-                self.interrupt_source_group
-                    .enable()
-                    .map_err(Error::EnableInterruptRoute)?;
             }
         }
 

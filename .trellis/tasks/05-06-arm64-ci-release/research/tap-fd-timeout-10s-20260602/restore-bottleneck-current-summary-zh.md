@@ -1285,3 +1285,274 @@ cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
   - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
   - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
 - 本地和远端 `msix.rs` 临时代码均已撤回，仅保留本段验证记录。
+
+## Restore 级 GSI route batch flush 负向验证
+
+背景：
+
+- 先前的 route cache 锁范围缩短实验显示：`route_cache_lock_hold_ms` 可以被压低，但 GSI routing flush 本身仍会形成串行热点。
+- 因此进一步尝试 restore 级 batch：在单 VM restore 期间推迟多次 `KVM_SET_GSI_ROUTING`，等设备 restore 结束后统一 flush。
+- 目标是减少 `KVM_SET_GSI_ROUTING` 次数，降低 restore 并发下的长尾。
+
+本地 x86 验证：
+
+```bash
+cargo fmt --manifest-path hypervisor/Cargo.toml -- --check
+cargo check --manifest-path hypervisor/Cargo.toml -p vmm --features kvm
+```
+
+结果：通过，仅有项目既有 warning。
+
+远端 ARM64 构建与部署：
+
+- 构建目录：`/opt/cubesandbox-build/upper-create-timing-20260602-src`
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release`
+- 构建耗时：约 `4m06s`
+- 临时部署 shim sha256：`75845f8ecdfc44cd30ad9fc0d52a6dbe50f5522b6cb0719e5205ef09b1fa4e16`
+- 临时部署 cube-runtime sha256：`7be31736ffc3f21ab39d6eed652fb4df116add3c389c35191348ff5466b56ffc`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py msi-route-batch-smoke-c1-n1 1 1
+./run_create_only_case.py msi-route-batch-c50-n100 50 100
+./run_create_only_case.py msi-route-batch-c100-n200 100 200
+```
+
+原始数据已保存到本地：
+
+```text
+.trellis/tasks/05-06-arm64-ci-release/research/tap-fd-timeout-10s-20260602/results/20260604-msix-route-experiments/
+```
+
+结果：
+
+| 场景 | 成功率 | errors | create avg | create p50 | create p90 | create p95 | create p99 | create max | e2e 总耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| c1 n1 smoke | `100%` | `0` | `52.188ms` | `52.188ms` | `52.188ms` | `52.188ms` | `52.188ms` | `52.188ms` | `0.0524s` | `19.09/s` |
+| c50 n100 | `99.0%` | `1` | `146.045ms` | `154.447ms` | `196.270ms` | `204.668ms` | `218.712ms` | `218.712ms` | `0.3670s` | `269.77/s` |
+| c100 n200 | `99.5%` | `1` | `452.813ms` | `528.842ms` | `779.715ms` | `847.993ms` | `895.409ms` | `935.491ms` | `1.1210s` | `177.53/s` |
+
+对比稳定基线：
+
+- 稳定基线 c100 n200：成功率 `100%`，p99 约 `805.4ms`，e2e 总耗时约 `1.203s`。
+- batch flush c100 n200：成功率降到 `99.5%`，p99 升到 `895.4ms`。虽然 e2e 总耗时略低，但不稳定且尾延迟变差。
+
+判断：
+
+- 该优化不保留。
+- 二进制中确认存在 `interrupt_manager_route_batch`、`deferred_gsi_routes` marker，说明测试二进制确实包含本次实验代码。
+- cubelet 捕获日志未能稳定收集到 shim 内部 timing，因此本次主要依据 create-only 原始结果和二进制 marker。
+- 结果说明单纯推迟 GSI routing flush 不足以解决主要长尾，且会引入恢复时序风险。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 batch flush 实验代码已撤回；当前仅保留已验证有效的观测字段和 MSI-X restore 后置全量 `enable()` 删除。
+
+## MSI-X selected-vector restore 负向验证
+
+背景：
+
+- `MsixConfig::set_state()` 在 restore 时会遍历 MSI-X table 中所有未 masked entries，并通过 `update_many()` 注册 irqfd 和刷新 GSI route。
+- 实验尝试只恢复 virtio common config 中实际被 driver 选择的 config vector 和 queue vectors，减少 restore 阶段 MSI-X route/irqfd 注册数量。
+
+实验过程：
+
+1. v1 直接从父 snapshot 读取 `virtio_pci_common_config` 状态，smoke 失败。
+2. v2 改为先进入 common config 子 snapshot，再读取 selected vectors；若子 snapshot 不存在则回退到原始全量 MSI-X restore。
+
+v1 失败原因：
+
+- `snapshot.to_state(common_config.id())` 被错误地用于父 snapshot。
+- smoke `0/1`，错误为缺少 `virtio_pci_common_config` section。
+
+远端 ARM64 v2 构建与部署：
+
+- 临时部署 shim sha256：`b1c6c2e86d2a2939924d57d72ea18a73720c292fb5b555e5781cbb94a8ee6103`
+- 临时部署 cube-runtime sha256：`62ed4cbd109ddbb4c8c4bcf197f5e40189904e2cb63f64730908d7a029489d92`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py msix-selected-v2-smoke-c1-n1 1 1
+./run_create_only_case.py msix-selected-v2-smoke2-c1-n1 1 1
+./run_create_only_case.py msix-selected-v2-c50-n100 50 100
+./run_create_only_case.py msix-selected-v2-c100-n200 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | errors | create avg | create p50 | create p90 | create p95 | create p99 | create max | e2e 总耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| v2 c1 n1 smoke | `100%` | `0` | `405.791ms` | `405.791ms` | `405.791ms` | `405.791ms` | `405.791ms` | `405.791ms` | `0.4062s` | `2.46/s` |
+| v2 c1 n1 smoke2 | `100%` | `0` | `35.621ms` | `35.621ms` | `35.621ms` | `35.621ms` | `35.621ms` | `35.621ms` | `0.0359s` | `27.89/s` |
+| v2 c50 n100 | `99.0%` | `1` | `105.861ms` | `104.739ms` | `147.658ms` | `151.885ms` | `167.518ms` | `167.518ms` | `0.2657s` | `372.60/s` |
+| v2 c100 n200 | `100%` | `0` | `446.663ms` | `515.778ms` | `758.943ms` | `777.805ms` | `830.833ms` | `874.825ms` | `1.0615s` | `188.41/s` |
+
+对比稳定基线：
+
+- 稳定基线 c100 n200：成功率 `100%`，p99 约 `805.4ms`，e2e 总耗时约 `1.203s`。
+- selected-vector v2 c100 n200：成功率 `100%`，e2e 总耗时降到 `1.0615s`，但 p99 升到 `830.8ms`。
+- c50 n100 出现 `1` 个 `130459` 初始化失败。
+
+判断：
+
+- 该优化不保留。
+- selected-vector 思路能够降低部分中位和总耗时，但没有改善 c100 p99，并且 c50 出现初始化失败。
+- 语义风险较高：restore 时仅依据 common config selected vector 恢复 MSI-X，可能遗漏设备恢复或 guest 后续路径依赖的 route 状态。
+- 后续不应继续在 `MsixConfig::restore()` 内跳过未 selected entries，除非先有更完整的 virtio/PCI MSI-X 状态机证明和失败复现收敛。
+
+恢复结果：
+
+- 远端 runtime 已恢复到稳定版本：
+  - `containerd-shim-cube-rs` sha256：`1e18ca7000faa9dfdebc07f93f35c71372f9ec716e2d1adb8c6e6797e94a96fc`
+  - `cube-runtime` sha256：`36c270319394f5712d057d6485667abd7b8f8cfcea1380f2468467748d604320`
+- 本地 selected-vector 实验代码已撤回。
+
+## 当前转向判断
+
+截至 2026-06-04，已经确认不适合继续推进的方向：
+
+- 粗粒度 IRQ routing 文件锁限流：会显著拉高 p95/p99。
+- route cache 锁范围收缩：会把等待转移到 flush 顺序路径，未形成稳定收益。
+- restore 级 GSI route batch flush：p99 变差且出现初始化失败。
+- MSI-X selected-vector restore：语义风险高，p99 未改善，c50 出现初始化失败。
+
+下一步应转向更保守的定位和优化：
+
+1. 保留 `MsiInterruptGroup::update_many()` 内部观测字段，以及 MSI-X restore 后置全量 `enable()` 删除。
+2. 用日志先确认每类 virtio 设备在 restore 中实际注册的 MSI-X vector 数量、queue 数量、route 数量。
+3. 优先寻找“为什么 snapshot 模板里存在这么多需要立即恢复的 MSI-X entries”，而不是在 restore 末端强行跳过注册。
+4. 若要减少注册数量，应先从模板生成、设备配置、virtqueue/MSI-X vector 分配策略入手，保证语义等价后再改 restore。
+
+## 2026-06-04 转向后修正
+
+最新验证已经修正上述转向判断中的两点：
+
+- MSI-X restore 后置全量 `enable()` 删除已经作为当前保留优化。`update_many()` 已经启用本次未 masked vector，后置全量 `enable()` 会重复扫描整个 interrupt group。
+- route cache 锁范围收缩、restore 级 batch flush、selected-vector 跳过、`irqfd-after-routing` 顺序调整均不保留。
+
+新增状态画像确认：
+
+- 单沙箱模板中所有未 masked MSI-X entries 都已经被 virtio common config 选中。
+- `msix_unmasked_unselected_entries=0`，因此 selected-vector 层面没有安全跳过空间。
+- 当前需要恢复的 MSI-X vector 数主要来自模板设备和 queue 数量，而不是 restore 层产生的“多余未选中 entry”。
+
+`irqfd-after-routing` 顺序实验结果：
+
+| 场景 | 成功率 | errors | create avg | create p99 | e2e 总耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| c1 n1 | `100%` | `0` | `48.766ms` | `48.766ms` | `0.0489s` | `20.44/s` |
+| c50 n100 | `98.0%` | `2` | `154.799ms` | `228.933ms` | `0.3967s` | `247.03/s` |
+
+结论：
+
+- `irqfd-after-routing` 降低了 `register_irqfd_ms` 的统计值，但把等待转移到了 `route_cache_lock_wait_ms` / `set_gsi_routes_ms`，并且 c50 成功率退化到 `98%`。
+- 本地代码已恢复为 `update_many()` 内先注册未 masked route，再统一刷新 GSI routing。
+- 后续优先从 benchmark 模板设备/队列/vector 数量和 KVM IRQ routing 并发容量继续分析。
+
+远端已恢复到已验证部署：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release --locked`
+- 构建耗时：`4m05s`
+- shim sha256：`a12968836a3b81cdb7d633a0c08e364f918265685bd5c02d5d12d27ad50d93bd`
+- cube-runtime sha256：`1916edb0c04fdf5e139660c5b0ef46dbbf0dde6aa2ef936bb3655429484c3a83`
+- `containerd.service` / `cube-sandbox-cubelet.service`：均为 `active`
+- profile systemd drop-in：已清理
+- 当前沙箱列表：`[]`
+
+恢复后 smoke：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py restored-skip-enable-smoke-c1-n1 1 1
+```
+
+结果：`100%` 成功，create p99 `45.9ms`，清理 `1/1`。
+
+最新原始数据目录：
+
+```text
+.trellis/tasks/05-06-arm64-ci-release/research/tap-fd-timeout-10s-20260602/results/20260604-restore-profile/
+```
+
+## 2026-06-05 no-profile 基线复测
+
+远端当前部署：
+
+- 机器：`root@192.168.25.61`
+- shim sha256：`a12968836a3b81cdb7d633a0c08e364f918265685bd5c02d5d12d27ad50d93bd`
+- cube-runtime sha256：`1916edb0c04fdf5e139660c5b0ef46dbbf0dde6aa2ef936bb3655429484c3a83`
+- profile：关闭
+- template：`tpl-arm64-bench-ubuntu2204`
+- mode：`create-only`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py restored-skip-enable-noprofile-c50-n100-20260605 50 100
+./run_create_only_case.py restored-skip-enable-noprofile-c100-n200-20260605 100 200
+./run_create_only_case.py restored-skip-enable-noprofile-c200-n400-20260605 200 400
+```
+
+结果：
+
+| 并发 / 总量 | 成功率 | errors | create avg | create p95 | create p99 | e2e 总耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 50 / 100 | `100%` | `0` | `142.747ms` | `204.364ms` | `208.747ms` | `0.3728s` | `268.25/s` |
+| 100 / 200 | `100%` | `0` | `433.137ms` | `734.737ms` | `779.553ms` | `1.0783s` | `185.48/s` |
+| 200 / 400 | `100%` | `0` | `1598.163ms` | `3084.151ms` | `3224.967ms` | `4.4933s` | `89.02/s` |
+
+判断：
+
+- 当前恢复部署三档均 `100%` 成功，清理后沙箱数为 `0`。
+- c100 p99 `779.553ms`，可作为当前 no-profile 对比基线。
+- c200 p99 `3224.967ms`，说明高并发 restore 容量瓶颈仍然存在。
+- 下一步建议在该基线下验证 benchmark 模板设备/队列/vector 减量，或评估 create 并发闸门。
+
+## 2026-06-05 release candidate 验证
+
+发布候选代码收敛：
+
+- 保留当前分支历史中已验证的 ARM64/network-agent/CubeVS/one-click 优化。
+- 保留 MSI-X restore 后置全量 `enable()` 删除。
+- 撤回本轮未提交的 restore profile 画像/日志字段，避免 release 包携带临时诊断噪声。
+
+远端部署：
+
+- 构建命令：`cd /opt/cubesandbox-build/upper-create-timing-20260602-src/CubeShim && cargo build --release --locked`
+- 构建耗时：`4m05s`
+- shim sha256：`c43da63c6e50e67297b32fa03bf2a02c6fdaf940d7f217e35504d4099566c3bd`
+- cube-runtime sha256：`b4df7ea4e633cbf2a2da3cc22a6183b6800f5c0cf6c2b99b3b45948bbf85ccd8`
+- profile：关闭
+- 服务状态：`containerd` / `cube-sandbox-cubelet` 均为 `active`
+
+测试命令：
+
+```bash
+cd /opt/cubesandbox-benchmarks/upper-create-timing-20260602
+./run_create_only_case.py release-candidate-msix-skip-smoke-c1-n1-20260605 1 1
+./run_create_only_case.py release-candidate-msix-skip-c100-n200-20260605 100 200
+./run_create_only_case.py release-candidate-msix-skip-c100-n200-rerun-20260605 100 200
+```
+
+结果：
+
+| 场景 | 成功率 | errors | create avg | create p95 | create p99 | e2e 总耗时 | 吞吐 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| c1 / n1 smoke | `100%` | `0` | `45.806ms` | `45.806ms` | `45.806ms` | `0.0460s` | `21.75/s` |
+| c100 / n200 | `98.5%` | `3` | `427.495ms` | `704.523ms` | `764.037ms` | `1.1025s` | `178.68/s` |
+| c100 / n200 rerun | `100%` | `0` | `436.120ms` | `755.973ms` | `813.484ms` | `1.0716s` | `186.64/s` |
+
+判断：
+
+- 发布候选 smoke 正常。
+- c100 首轮出现 `3` 个既有模式的 `130459` 初始化失败，清理后沙箱数为 `0`；远端服务、磁盘和内存均正常。
+- c100 rerun `200/200` 成功，p99 `813.484ms`，与当前 no-profile 基线同一量级。
+- 可继续作为优化版 one-click release candidate，但 release notes 需要记录 c100 首轮曾出现偶发 `130459`，高并发容量瓶颈仍待后续模板/vector 减量或并发闸门优化。
