@@ -68,6 +68,20 @@ copy_dir_contents() {
   cp -a "${src}/." "${dst}/"
 }
 
+stable_dir_hash() {
+  local dir="$1"
+  local path
+  ensure_dir "${dir}"
+
+  (
+    cd "${dir}"
+    while IFS= read -r -d '' path; do
+      printf '%s\n' "${path}"
+      sha256sum "${path}"
+    done < <(find . -type f -print0 | sort -z)
+  ) | sha256sum | awk '{print $1}'
+}
+
 latest_git_revision() {
   local repo_root="$1"
   if command -v git >/dev/null 2>&1 && git -C "${repo_root}" rev-parse --short HEAD >/dev/null 2>&1; then

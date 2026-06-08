@@ -228,7 +228,7 @@ write_cube_proxy_image_stamp() {
   local proxy_image="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
   local proxy_context_hash
 
-  proxy_context_hash="$(tar -C "${PACKAGE_ROOT}/cubeproxy/build-context" -cf - . | sha256sum | awk '{print $1}')"
+  proxy_context_hash="$(stable_dir_hash "${PACKAGE_ROOT}/cubeproxy/build-context")"
   printf '%s\n' "${proxy_image}:${proxy_context_hash}" > "${PACKAGE_ROOT}/cubeproxy/.image-build-stamp"
 }
 
@@ -270,6 +270,7 @@ build_docker_image_tars() {
   local openresty_image="${WEB_UI_IMAGE:-$(default_openresty_image)}"
   local proxy_image="${CUBE_PROXY_IMAGE_TAG:-cube-proxy:one-click}"
   local proxy_base_image="${CUBE_PROXY_BASE_IMAGE:-$(default_openresty_image)}"
+  local proxy_apk_mirror="${CUBE_PROXY_APK_MIRROR:-}"
   local proxy_context_hash
 
   rm -rf "${image_dir}"
@@ -285,6 +286,7 @@ build_docker_image_tars() {
   docker build \
     --platform "linux/${TARGET_ARCH}" \
     --build-arg "CUBE_PROXY_BASE_IMAGE=${proxy_base_image}" \
+    --build-arg "CUBE_PROXY_APK_MIRROR=${proxy_apk_mirror}" \
     -t "${proxy_image}" \
     "${PACKAGE_ROOT}/cubeproxy/build-context" >&2
   write_cube_proxy_image_stamp

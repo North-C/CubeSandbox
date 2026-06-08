@@ -10,6 +10,7 @@ source "${SCRIPT_DIR}/compose-lib.sh"
 require_root
 require_cmd docker
 require_cmd sed
+require_cmd sha256sum
 require_cmd ss
 
 CUBE_PROXY_ENABLE="${CUBE_PROXY_ENABLE:-1}"
@@ -34,7 +35,10 @@ CUBE_PROXY_HTTPS_PORT="${CUBE_PROXY_HTTPS_PORT:-443}"
 CUBE_PROXY_HTTP_PORT="${CUBE_PROXY_HTTP_PORT:-80}"
 CUBE_PROXY_SSL_CERT="${CUBE_PROXY_SSL_CERT:-cube.app+3.pem}"
 CUBE_PROXY_SSL_KEY="${CUBE_PROXY_SSL_KEY:-cube.app+3-key.pem}"
+CUBE_PROXY_APK_MIRROR="${CUBE_PROXY_APK_MIRROR:-}"
+CUBE_PROXY_REBUILD_IMAGE="${CUBE_PROXY_REBUILD_IMAGE:-0}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
+BUILD_STAMP_FILE="${PROXY_DIR}/.image-build-stamp"
 
 normalize_one_click_arch() {
   local raw="${1:-}"
@@ -132,6 +136,10 @@ EOF
     >/dev/null 2>&1
 }
 
+build_context_hash() {
+  stable_dir_hash "${BUILD_CONTEXT_DIR}"
+}
+
 escape_sed() {
   printf '%s' "$1" | sed 's/[\/&]/\\&/g'
 }
@@ -183,6 +191,7 @@ sed \
 sed \
   -e "s#__CUBE_PROXY_IMAGE__#$(escape_sed "${CUBE_PROXY_IMAGE_TAG}")#g" \
   -e "s#__CUBE_PROXY_BASE_IMAGE__#$(escape_sed "${CUBE_PROXY_BASE_IMAGE}")#g" \
+  -e "s#__CUBE_PROXY_APK_MIRROR__#$(escape_sed "${CUBE_PROXY_APK_MIRROR}")#g" \
   -e "s#__CUBE_PROXY_CONTAINER_NAME__#$(escape_sed "${CUBE_PROXY_CONTAINER_NAME}")#g" \
   -e "s#__CUBE_PROXY_BUILD_CONTEXT__#$(escape_sed "${BUILD_CONTEXT_DIR}")#g" \
   -e "s#__CUBE_PROXY_CERT_DIR__#$(escape_sed "${CERT_DIR}")#g" \
@@ -201,7 +210,16 @@ for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
   fi
 done
 
-compose_run build cube-proxy
+context_hash="$(build_context_hash)"
+expected_stamp="${CUBE_PROXY_IMAGE_TAG}:${context_hash}"
+if docker_image_exists "${CUBE_PROXY_IMAGE_TAG}" && [[ "${CUBE_PROXY_REBUILD_IMAGE}" != "1" ]]; then
+  if [[ -f "${BUILD_STAMP_FILE}" && "$(<"${BUILD_STAMP_FILE}")" != "${expected_stamp}" ]]; then
+    log "cube-proxy build stamp differs from installed context; using preloaded ${CUBE_PROXY_IMAGE_TAG}. Set CUBE_PROXY_REBUILD_IMAGE=1 to rebuild."
+  fi
+else
+  compose_run build cube-proxy
+  printf '%s\n' "${expected_stamp}" > "${BUILD_STAMP_FILE}"
+fi
 compose_run up -d cube-proxy
 
 for _ in {1..40}; do

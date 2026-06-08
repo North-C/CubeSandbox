@@ -1,9 +1,12 @@
 ARG CUBE_PROXY_BASE_IMAGE=cube-sandbox-image.tencentcloudcr.com/opensource/openresty:1.21.4.1-6-alpine-fat
 FROM ${CUBE_PROXY_BASE_IMAGE}
+ARG CUBE_PROXY_APK_MIRROR=
 
 LABEL maintainer="staryxchen <staryxchen@tencent.com>"
 
-RUN sed -i 's#https\?://dl-cdn.alpinelinux.org#http://mirrors.tencent.com#g' /etc/apk/repositories \
+RUN if [ -n "${CUBE_PROXY_APK_MIRROR}" ]; then \
+        sed -i "s#https\\?://dl-cdn.alpinelinux.org#${CUBE_PROXY_APK_MIRROR}#g" /etc/apk/repositories; \
+    fi \
     && mkdir -p /data/log/cube-proxy/ \
     && apk update \
     && apk add --no-cache tzdata curl wget \

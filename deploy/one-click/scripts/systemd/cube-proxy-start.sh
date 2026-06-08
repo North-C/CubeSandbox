@@ -37,6 +37,8 @@ CUBE_PROXY_REDIS_IP="${CUBE_PROXY_REDIS_IP:-${CUBE_SANDBOX_NODE_IP}}"
 CUBE_PROXY_REDIS_PORT="${CUBE_PROXY_REDIS_PORT:-${CUBE_SANDBOX_REDIS_PORT:-6379}}"
 CUBE_PROXY_REDIS_PASSWORD="${CUBE_PROXY_REDIS_PASSWORD:-${CUBE_SANDBOX_REDIS_PASSWORD:-ceuhvu123}}"
 CUBE_PROXY_BASE_IMAGE="${CUBE_PROXY_BASE_IMAGE:-$(default_openresty_image)}"
+CUBE_PROXY_APK_MIRROR="${CUBE_PROXY_APK_MIRROR:-}"
+CUBE_PROXY_REBUILD_IMAGE="${CUBE_PROXY_REBUILD_IMAGE:-0}"
 MKCERT_BUNDLED_BIN="${TOOLBOX_ROOT}/support/bin/mkcert"
 BUILD_STAMP_FILE="${PROXY_DIR}/.image-build-stamp"
 
@@ -121,7 +123,7 @@ prepare_proxy_certs() {
 }
 
 build_context_hash() {
-  tar -C "${BUILD_CONTEXT_DIR}" -cf - . | sha256sum | awk '{print $1}'
+  stable_dir_hash "${BUILD_CONTEXT_DIR}"
 }
 
 prepare_proxy_certs
@@ -151,12 +153,18 @@ for port in "${CUBE_PROXY_HTTP_PORT}" "${CUBE_PROXY_HTTPS_PORT}"; do
 done
 
 context_hash="$(build_context_hash)"
-if [[ ! -f "${BUILD_STAMP_FILE}" || "$(<"${BUILD_STAMP_FILE}")" != "${CUBE_PROXY_IMAGE_TAG}:${context_hash}" ]] || ! docker_image_exists "${CUBE_PROXY_IMAGE_TAG}"; then
+expected_stamp="${CUBE_PROXY_IMAGE_TAG}:${context_hash}"
+if docker_image_exists "${CUBE_PROXY_IMAGE_TAG}" && [[ "${CUBE_PROXY_REBUILD_IMAGE}" != "1" ]]; then
+  if [[ -f "${BUILD_STAMP_FILE}" && "$(<"${BUILD_STAMP_FILE}")" != "${expected_stamp}" ]]; then
+    log "cube-proxy build stamp differs from installed context; using preloaded ${CUBE_PROXY_IMAGE_TAG}. Set CUBE_PROXY_REBUILD_IMAGE=1 to rebuild."
+  fi
+else
   docker build \
     --build-arg "CUBE_PROXY_BASE_IMAGE=${CUBE_PROXY_BASE_IMAGE}" \
+    --build-arg "CUBE_PROXY_APK_MIRROR=${CUBE_PROXY_APK_MIRROR}" \
     -t "${CUBE_PROXY_IMAGE_TAG}" \
     "${BUILD_CONTEXT_DIR}" >&2
-  printf '%s\n' "${CUBE_PROXY_IMAGE_TAG}:${context_hash}" > "${BUILD_STAMP_FILE}"
+  printf '%s\n' "${expected_stamp}" > "${BUILD_STAMP_FILE}"
 fi
 
 docker create \

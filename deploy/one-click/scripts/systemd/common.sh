@@ -41,6 +41,20 @@ ensure_dir() {
   [[ -d "${path}" ]] || die "required directory not found: ${path}"
 }
 
+stable_dir_hash() {
+  local dir="$1"
+  local path
+  ensure_dir "${dir}"
+
+  (
+    cd "${dir}"
+    while IFS= read -r -d '' path; do
+      printf '%s\n' "${path}"
+      sha256sum "${path}"
+    done < <(find . -type f -print0 | sort -z)
+  ) | sha256sum | awk '{print $1}'
+}
+
 ensure_executable() {
   local path="$1"
   [[ -x "${path}" ]] || die "required executable not found: ${path}"

@@ -114,10 +114,19 @@ CUBE_SANDBOX_REDIS_PORT=6379
 
 CUBE_PROXY_HTTP_PORT=80
 CUBE_PROXY_HTTPS_PORT=443
+CUBE_PROXY_REBUILD_IMAGE=0
 
 WEB_UI_HOST_PORT=12088
 CUBEMASTER_METRIC_LOOP=0
 ```
+
+`ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=0` 只表示安装脚本不会改写 Docker daemon 的
+registry mirror；它不会改写 `cube-proxy` Dockerfile 的基础镜像或 apk 软件源。离线包
+已经包含 `cube-proxy-one-click.tar`，常规离线安装应保持 `CUBE_PROXY_REBUILD_IMAGE=0`，
+使用包内预置镜像，避免在目标机现场重建 `cube-proxy` 并访问外部镜像仓库或软件源。
+只有明确需要重建 `cube-proxy` 镜像时，才设置 `CUBE_PROXY_REBUILD_IMAGE=1`；此时如果
+目标机无法访问公网，还需要额外配置可访问的 `CUBE_PROXY_BASE_IMAGE` 和
+`CUBE_PROXY_APK_MIRROR`。
 
 如果当前 Docker 不支持 `host.docker.internal:host-gateway`，或者 WebUI 反代需要直接访问宿主
 CubeAPI，可额外设置为目标机实际可从容器内访问的宿主地址和 CubeAPI 端口：

@@ -51,6 +51,20 @@ ensure_dir() {
   [[ -d "${path}" ]] || die "required directory not found: ${path}"
 }
 
+stable_dir_hash() {
+  local dir="$1"
+  local path
+  ensure_dir "${dir}"
+
+  (
+    cd "${dir}"
+    while IFS= read -r -d '' path; do
+      printf '%s\n' "${path}"
+      sha256sum "${path}"
+    done < <(find . -type f -print0 | sort -z)
+  ) | sha256sum | awk '{print $1}'
+}
+
 mkdir -p "${RUNTIME_DIR}" "${LOG_DIR}"
 
 one_click_deploy_role() {
@@ -214,6 +228,11 @@ stop_by_pidfile() {
 container_exists() {
   local name="$1"
   docker ps -a --format '{{.Names}}' | rg -x "${name}" >/dev/null 2>&1
+}
+
+docker_image_exists() {
+  local image_ref="$1"
+  docker image inspect "${image_ref}" >/dev/null 2>&1
 }
 
 wait_for_http() {
