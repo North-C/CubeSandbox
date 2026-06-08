@@ -419,9 +419,7 @@ copy_dir_contents "${RUNTIME_LAYOUT_DIR}/cube-image-linux-${TARGET_ARCH}" "${PAC
 ln -sfn "cube-kernel-scf-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-kernel-scf"
 ln -sfn "cube-image-linux-${TARGET_ARCH}" "${PACKAGE_ROOT}/cube-image"
 
-copy_file "${SCRIPT_DIR}/scripts/one-click/common.sh" "${PACKAGE_ROOT}/scripts/one-click/common.sh"
-copy_file "${SCRIPT_DIR}/scripts/one-click/quickcheck.sh" "${PACKAGE_ROOT}/scripts/one-click/quickcheck.sh"
-copy_file "${SCRIPT_DIR}/scripts/one-click/seed-cubemaster-metrics.sh" "${PACKAGE_ROOT}/scripts/one-click/seed-cubemaster-metrics.sh"
+copy_dir_contents "${SCRIPT_DIR}/scripts/one-click" "${PACKAGE_ROOT}/scripts/one-click"
 copy_dir_contents "${SCRIPT_DIR}/scripts/systemd" "${PACKAGE_ROOT}/scripts/systemd"
 # cube-diag is the documented diagnostic entry point (see docs/guide/service-management.md);
 # it must ship in the release bundle so the install layout exposes
