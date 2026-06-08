@@ -56,19 +56,22 @@ getenforce 2>/dev/null || true
 - `/data/cubelet` 位于 XFS 文件系统
 - 内网 DNS 可用，且 `/etc/resolv.conf` 存在
 
-安装前建议检查端口冲突：
+安装前建议按 `.env` 中实际配置检查端口冲突。默认端口包括：
 
 ```bash
-ss -lntup | grep -E ':3306|:23306|:6379|:26379|:13000|:18089|:19090|:12088|:53' || true
+ss -lntup | grep -E ':3306|:6379|:3000|:8089|:19090|:12088|:53' || true
 ```
 
-如果目标机已有 MySQL、Redis 或 Web 服务，建议使用非默认端口，避免 Docker 端口映射冲突。
+如果目标机已有 MySQL、Redis 或 Web 服务，建议使用空闲端口覆盖
+`CUBE_SANDBOX_MYSQL_PORT`、`CUBE_SANDBOX_REDIS_PORT`、`CUBE_API_BIND`、
+`CUBEMASTER_ADDR`、`CUBE_PROXY_HTTP_PORT`、`CUBE_PROXY_HTTPS_PORT` 或
+`WEB_UI_HOST_PORT`，避免 Docker 端口映射冲突。
 
 ## 上传并解压
 
 ```bash
-mkdir -p /opt/cubesandbox-oneclick
-cd /opt/cubesandbox-oneclick
+mkdir -p <work-dir>
+cd <work-dir>
 
 sha256sum cube-sandbox-one-click-90a87ac-arm64-optimized.tar.gz
 tar -xzf cube-sandbox-one-click-90a87ac-arm64-optimized.tar.gz
@@ -87,7 +90,8 @@ cat VERSION.txt
 cp env.example .env
 ```
 
-内网 all-in-one 控制节点推荐修改以下配置：
+内网 all-in-one 控制节点建议至少确认以下配置。多数场景可保留 `env.example` 默认值；
+只有在端口冲突、外部访问或网络环境不一致时再覆盖：
 
 ```bash
 ONE_CLICK_TARGET_ARCH=arm64
@@ -95,33 +99,33 @@ ONE_CLICK_DEPLOY_ROLE=control
 ONE_CLICK_RUN_QUICKCHECK=1
 ONE_CLICK_ENABLE_TENCENT_DOCKER_MIRROR=0
 
-CUBEMASTER_ADDR=127.0.0.1:18089
-CUBE_API_BIND=0.0.0.0:13000
+CUBEMASTER_ADDR=127.0.0.1:8089
+CUBE_API_BIND=0.0.0.0:3000
 
 NETWORK_AGENT_HEALTH_ADDR=127.0.0.1:19090
-NETWORK_AGENT_READY_TIMEOUT=240
+NETWORK_AGENT_READY_TIMEOUT=120
 
-CUBE_SANDBOX_MYSQL_PORT=23306
-CUBE_SANDBOX_REDIS_PORT=26379
+CUBE_SANDBOX_MYSQL_PORT=3306
+CUBE_SANDBOX_REDIS_PORT=6379
 
-CUBE_PROXY_HTTP_PORT=10081
-CUBE_PROXY_HTTPS_PORT=10444
+CUBE_PROXY_HTTP_PORT=80
+CUBE_PROXY_HTTPS_PORT=443
 
 WEB_UI_HOST_PORT=12088
 CUBEMASTER_METRIC_LOOP=0
 ```
 
 如果当前 Docker 不支持 `host.docker.internal:host-gateway`，或者 WebUI 反代需要直接访问宿主
-CubeAPI，可额外设置：
+CubeAPI，可额外设置为目标机实际可从容器内访问的宿主地址和 CubeAPI 端口：
 
 ```bash
-WEB_UI_UPSTREAM=http://172.17.0.1:13000
+WEB_UI_UPSTREAM=http://<docker-bridge-gateway-or-host-ip>:3000
 ```
 
 如果 Docker 支持 `host-gateway`，也可以使用：
 
 ```bash
-WEB_UI_UPSTREAM=http://host.docker.internal:13000
+WEB_UI_UPSTREAM=http://host.docker.internal:3000
 ```
 
 可以通过 Docker 版本判断是否支持 `host-gateway`。若需要实际验证，请使用目标机本地已有镜像，
@@ -212,7 +216,7 @@ HTTP 健康检查：
 ```bash
 curl -fsS 127.0.0.1:19090/healthz
 curl -fsS 127.0.0.1:19090/readyz
-curl -fsS 127.0.0.1:13000/health
+curl -fsS 127.0.0.1:3000/health
 ```
 
 期望输出：
@@ -255,10 +259,10 @@ docker version
 docker run --rm --add-host host.docker.internal:host-gateway <local-image> true
 ```
 
-如果 Docker 不支持，改 `.env`：
+如果 Docker 不支持，改 `.env`，将地址替换为目标机实际可从容器内访问的宿主地址：
 
 ```bash
-WEB_UI_UPSTREAM=http://172.17.0.1:13000
+WEB_UI_UPSTREAM=http://<docker-bridge-gateway-or-host-ip>:3000
 ```
 
 然后重启：
@@ -278,15 +282,15 @@ driver failed programming external connectivity on endpoint cube-sandbox-mysql
 查看：
 
 ```bash
-ss -lntup | grep -E ':3306|:23306' || true
+ss -lntup | grep -E ':3306|:<mysql-host-port>' || true
 docker ps -a | grep cube-sandbox-mysql || true
 journalctl -u docker -b --no-pager -n 120
 ```
 
-若默认 `3306` 冲突，推荐在 `.env` 中使用：
+若默认 `3306` 冲突，在 `.env` 中换成空闲端口：
 
 ```bash
-CUBE_SANDBOX_MYSQL_PORT=23306
+CUBE_SANDBOX_MYSQL_PORT=<mysql-host-port>
 ```
 
 修改后重新启动：
@@ -324,7 +328,7 @@ systemctl stop cube-sandbox-control.target cube-sandbox-compute.target 2>/dev/nu
 执行包内卸载脚本：
 
 ```bash
-cd /opt/cubesandbox-oneclick/cube-sandbox-one-click-90a87ac-arm64-optimized
+cd <one-click-release-dir>
 bash down.sh
 ```
 
@@ -340,19 +344,19 @@ docker rm -f cube-sandbox-mysql cube-sandbox-redis cube-proxy cube-proxy-coredns
 
 验证时间：2026-06-08
 
-`root@192.168.25.65`：
+验证机 A：
 
 - 系统架构：`aarch64`
-- Docker：`25.0.5`
 - `/data/cubelet`：XFS
 - release 包 SHA256 与本文记录一致
 - 包内存在 `env.example`、`install.sh`、`VERSION.txt`
+- 已验证 release tar 包不包含 `.env`，只包含 `env.example`
 - 已验证 `cp env.example .env` 后修改端口、`CUBE_API_BIND`、`WEB_UI_UPSTREAM` 等变量的流程
 - 已确认包内安装后包含离线 Docker 镜像 tar：
   `mysql-8.0.tar`、`redis-7-alpine.tar`、`coredns-1.14.2.tar`、
   `openresty-1.21.4.1-6-alpine-fat.tar`、`cube-proxy-one-click.tar`
 
-`root@192.168.25.61`：
+验证机 B：
 
 - 使用同一 optimized release 包完成安装
 - `systemctl --failed --no-pager` 为 0
@@ -361,4 +365,4 @@ docker rm -f cube-sandbox-mysql cube-sandbox-redis cube-proxy cube-proxy-coredns
 - 健康检查返回：
   - `127.0.0.1:19090/healthz`: `ok`
   - `127.0.0.1:19090/readyz`: `ready`
-  - `127.0.0.1:13000/health`: `{"status":"ok","sandboxes":0}`
+  - `127.0.0.1:<cube-api-port>/health`: `{"status":"ok","sandboxes":0}`

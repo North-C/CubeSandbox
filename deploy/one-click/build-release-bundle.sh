@@ -456,7 +456,7 @@ chmod +x \
   "${DIST_ROOT}/online-install.sh"
 
 cat > "${DIST_ROOT}/VERSION.txt" <<EOF
-repo=${ROOT_DIR}
+repo=CubeSandbox
 revision=${DIST_VERSION}
 built_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 EOF
