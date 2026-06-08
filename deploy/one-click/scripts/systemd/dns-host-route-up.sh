@@ -13,6 +13,7 @@ require_cmd ip
 COREDNS_DIR="${TOOLBOX_ROOT}/coredns"
 DNS_MODE_FILE="${COREDNS_DIR}/host-dns-mode"
 DNS_IFACE_FILE="${COREDNS_DIR}/host-dns-interface"
+RESOLV_UPSTREAM_PATH="${COREDNS_DIR}/resolv.conf.upstream"
 DEFAULT_COREDNS_BIND_ADDR="${CUBE_PROXY_COREDNS_BIND_ADDR:-127.0.0.54}"
 RESOLVED_COREDNS_BIND_ADDR="${CUBE_PROXY_RESOLVED_DNS_ADDR:-169.254.254.53}"
 COREDNS_BIND_ADDR="${DEFAULT_COREDNS_BIND_ADDR}"
@@ -22,6 +23,7 @@ NM_CONF_DIR="/etc/NetworkManager/conf.d"
 NM_DNSMASQ_DIR="/etc/NetworkManager/dnsmasq.d"
 NM_MAIN_CONF="${NM_CONF_DIR}/90-cubeproxy-dns.conf"
 NM_DOMAIN_CONF="${NM_DNSMASQ_DIR}/90-cubeproxy-cube-app.conf"
+SYSTEM_DNSMASQ_CONF="/etc/dnsmasq.d/90-cubeproxy-cube-app.conf"
 HOST_DNS_BACKEND="networkmanager-dnsmasq"
 
 if command -v resolvectl >/dev/null 2>&1; then
@@ -32,6 +34,16 @@ fi
 networkmanager_available() {
   command -v systemctl >/dev/null 2>&1 || return 1
   [[ "$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)" == "loaded" ]]
+}
+
+system_dnsmasq_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  command -v ss >/dev/null 2>&1 || return 1
+  [[ "$(systemctl show -p LoadState --value dnsmasq 2>/dev/null || true)" == "loaded" ]] || return 1
+  systemctl is-active --quiet dnsmasq
+  local sockets
+  sockets="$(ss -lnup "( sport = :53 )" 2>/dev/null || true)"
+  [[ "${sockets}" == *"127.0.0.1:53"* && "${sockets}" == *"dnsmasq"* ]]
 }
 
 link_exists() {
@@ -165,10 +177,41 @@ EOF
   printf '%s\n' "${RESOLVED_LINK_NAME}" > "${DNS_IFACE_FILE}"
 }
 
+configure_with_system_dnsmasq() {
+  require_cmd systemctl
+  install_dnsmasq
+  ensure_file "${RESOLV_UPSTREAM_PATH}"
+
+  # Reuse an existing host dnsmasq.service instead of enabling
+  # NetworkManager's dnsmasq plugin. This avoids 127.0.0.1:53 conflicts on
+  # machines that already run dnsmasq as the host stub resolver.
+  ensure_resolved_link
+  rm -f "${NM_MAIN_CONF}" "${NM_DOMAIN_CONF}"
+
+  mkdir -p "$(dirname "${SYSTEM_DNSMASQ_CONF}")"
+  cat > "${SYSTEM_DNSMASQ_CONF}" <<EOF
+listen-address=127.0.0.1,${RESOLVED_COREDNS_BIND_ADDR}
+bind-interfaces
+resolv-file=${RESOLV_UPSTREAM_PATH}
+server=/cube.app/${COREDNS_BIND_ADDR}#53
+EOF
+
+  systemctl restart dnsmasq >/dev/null
+
+  wait_for_udp_listen "${RESOLVED_COREDNS_BIND_ADDR}" 53 30 || \
+    die "dnsmasq did not bind ${RESOLVED_COREDNS_BIND_ADDR}:53 after dnsmasq restart"
+  write_host_resolv_conf "${RESOLVED_COREDNS_BIND_ADDR}"
+
+  printf 'system-dnsmasq\n' > "${DNS_MODE_FILE}"
+  printf '%s\n' "${RESOLVED_LINK_NAME}" > "${DNS_IFACE_FILE}"
+}
+
 ensure_dir "${COREDNS_DIR}"
 rm -f "${DNS_MODE_FILE}" "${DNS_IFACE_FILE}"
 if [[ "${HOST_DNS_BACKEND}" == "systemd-resolved" ]]; then
   configure_with_resolved
+elif system_dnsmasq_available; then
+  configure_with_system_dnsmasq
 else
   configure_with_networkmanager
 fi

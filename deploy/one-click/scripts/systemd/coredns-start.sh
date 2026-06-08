@@ -40,6 +40,7 @@ is_stub_nameserver() {
   [[ "${nameserver}" == ::1 ]] && return 0
   [[ "${nameserver}" == 0:0:0:0:0:0:0:1 ]] && return 0
   [[ "${nameserver}" == "${COREDNS_BIND_ADDR}" ]] && return 0
+  [[ "${nameserver}" == "${RESOLVED_COREDNS_BIND_ADDR}" ]] && return 0
   return 1
 }
 

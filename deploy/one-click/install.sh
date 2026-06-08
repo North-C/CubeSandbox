@@ -76,6 +76,16 @@ require_any_cmd() {
   die "requires one of commands: $*"
 }
 
+system_dnsmasq_available() {
+  command -v systemctl >/dev/null 2>&1 || return 1
+  command -v ss >/dev/null 2>&1 || return 1
+  [[ "$(systemctl show -p LoadState --value dnsmasq 2>/dev/null || true)" == "loaded" ]] || return 1
+  systemctl is-active --quiet dnsmasq
+  local sockets
+  sockets="$(ss -lnup "( sport = :53 )" 2>/dev/null || true)"
+  [[ "${sockets}" == *"127.0.0.1:53"* && "${sockets}" == *"dnsmasq"* ]]
+}
+
 install_required_dependencies() {
   log "checking and installing dependencies..."
   install_ripgrep
@@ -95,9 +105,13 @@ check_dns_preflight() {
   fi
 
   require_cmd systemctl
+  if system_dnsmasq_available; then
+    return 0
+  fi
+
   local nm_load_state
   nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
-  [[ "${nm_load_state}" == "loaded" ]] || die "DNS setup requires resolvectl or NetworkManager"
+  [[ "${nm_load_state}" == "loaded" ]] || die "DNS setup requires resolvectl, an active dnsmasq.service, or NetworkManager"
 
   if ! command -v dnsmasq >/dev/null 2>&1; then
     require_any_cmd dnf yum apt-get
@@ -401,6 +415,51 @@ install_systemd_units() {
     "${install_units_script}"
 }
 
+selinux_enabled() {
+  if command -v selinuxenabled >/dev/null 2>&1; then
+    selinuxenabled
+    return $?
+  fi
+
+  if command -v getenforce >/dev/null 2>&1; then
+    [[ "$(getenforce 2>/dev/null || true)" != "Disabled" ]]
+    return $?
+  fi
+
+  return 1
+}
+
+relabel_for_selinux() {
+  command -v restorecon >/dev/null 2>&1 || return 0
+  selinux_enabled || return 0
+
+  local -a paths=("${INSTALL_PREFIX}")
+  local path
+  shopt -s nullglob
+  for path in \
+    /etc/systemd/system/cube-sandbox*.service \
+    /etc/systemd/system/cube-sandbox*.target \
+    /etc/systemd/system/cube-sandbox*.timer
+  do
+    paths+=("${path}")
+  done
+  shopt -u nullglob
+
+  for path in \
+    /usr/local/bin/containerd-shim-cube-rs \
+    /usr/local/bin/cube-runtime \
+    /usr/local/bin/cubecli \
+    /usr/local/bin/cubemastercli
+  do
+    [[ -e "${path}" || -L "${path}" ]] && paths+=("${path}")
+  done
+
+  log "relabeling installed files for SELinux"
+  if ! restorecon -R "${paths[@]}"; then
+    log "WARNING: restorecon failed; systemd may fail with 203/EXEC on SELinux enforcing hosts"
+  fi
+}
+
 configure_metrics_timer() {
   if [[ "${DEPLOY_ROLE}" != "control" ]]; then
     systemctl disable --now cube-sandbox-seed-cubemaster-metrics.timer >/dev/null 2>&1 || true
@@ -613,6 +672,7 @@ else
 fi
 
 install_systemd_units
+relabel_for_selinux
 start_systemd_target
 configure_metrics_timer
 

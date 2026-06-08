@@ -50,8 +50,12 @@ getenforce 2>/dev/null || true
 - `uname -m` 应为 `aarch64`
 - Docker engine 已安装并可启动
 - `rg`、`awk`、`systemctl`、`ip`、`ss` 等基础命令可用
-- 若目标机没有 `resolvectl`，需要 `NetworkManager` 可用；若缺少 `dnsmasq`，需要已预装
-  `dnsmasq` 或配置可用的内网软件源
+- DNS split routing 使用以下路径之一：
+  `resolvectl` / `systemd-resolved`、已有且 active 并监听 `127.0.0.1:53` 的
+  `dnsmasq.service`，或
+  `NetworkManager + dnsmasq`
+- 若目标机没有 `resolvectl` 且没有上述宿主 stub `dnsmasq.service`，需要
+  `NetworkManager` 可用；若缺少 `dnsmasq`，需要已预装 `dnsmasq` 或配置可用的内网软件源
 - `/dev/kvm` 可用
 - `/data/cubelet` 位于 XFS 文件系统
 - 内网 DNS 可用，且 `/etc/resolv.conf` 存在
@@ -154,12 +158,24 @@ options timeout:2 attempts:2
 EOF
 ```
 
-然后确认 NetworkManager 或 systemd-resolved 路径可用：
+然后确认可用的 DNS split routing 路径：
 
 ```bash
 command -v resolvectl || true
+systemctl status dnsmasq --no-pager -l || true
 systemctl status NetworkManager --no-pager -l || true
 ```
+
+新版本安装器的 DNS fallback 顺序为：
+
+1. 若存在 `resolvectl`，使用 `systemd-resolved` 和专用 dummy link `cube-dns0`
+2. 若没有 `resolvectl`，但宿主已有 active 且监听 `127.0.0.1:53` 的
+   `dnsmasq.service`，复用该服务，新增 `/etc/dnsmasq.d/90-cubeproxy-cube-app.conf`，
+   让它额外监听 `169.254.254.53` 并把 `cube.app` 转发到 one-click CoreDNS
+3. 若上述两者都不可用，回退到 `NetworkManager + dnsmasq`
+
+这可以避免目标机已有 `dnsmasq.service` 绑定 `127.0.0.1:53` 时，NetworkManager
+dnsmasq 插件再次抢占同一端口导致 `cube-sandbox-dns.service` 超时。
 
 ## 执行安装
 
@@ -175,9 +191,12 @@ bash install.sh
 - 将 `.env` 复制为 `/usr/local/services/cubetoolbox/.one-click.env`
 - 加载包内 Docker 镜像
 - 安装并启动 systemd units
+- 如果目标机启用了 SELinux 且存在 `restorecon`，自动对安装目录、systemd units 和
+  `/usr/local/bin` 下 one-click 命令执行 relabel
 - 在 `ONE_CLICK_RUN_QUICKCHECK=1` 时执行 quickcheck
 
-如果目标机启用了 SELinux enforcing，且安装后出现 systemd `203/EXEC`，执行：
+新版本安装器会自动处理 SELinux relabel。若使用旧 release 包，或者安装后仍出现 systemd
+`203/EXEC`，可手动执行：
 
 ```bash
 restorecon -Rv /usr/local/services/cubetoolbox /etc/systemd/system/cube-sandbox-*.service
@@ -242,7 +261,24 @@ ip -d link show cube-dns0 2>/dev/null || true
 
 如果日志显示 `killed, status=15/TERM`，通常是 `TimeoutStartSec` 到期后 systemd 杀掉
 `dns-host-route-up.sh`。需要继续确认脚本卡在 `resolvectl`、`systemctl restart
-NetworkManager`，还是等待 `169.254.254.53:53`。
+dnsmasq`、`systemctl restart NetworkManager`，还是等待 `169.254.254.53:53`。
+
+如果目标机已有宿主 `dnsmasq.service`，且日志出现：
+
+```text
+failed to create listening socket for 127.0.0.1: Address already in use
+```
+
+新版本安装器会自动走 `system-dnsmasq` fallback，期望状态为：
+
+```bash
+cat /usr/local/services/cubetoolbox/coredns/host-dns-mode
+cat /etc/dnsmasq.d/90-cubeproxy-cube-app.conf
+ss -lnup '( sport = :53 )' | grep -E '127.0.0.1|169.254.254.53|127.0.0.54'
+```
+
+其中 `host-dns-mode` 应为 `system-dnsmasq`，`dnsmasq` 应监听
+`127.0.0.1:53` 和 `169.254.254.53:53`，CoreDNS 应监听 `127.0.0.54:53`。
 
 ### WebUI host-gateway 不支持
 
@@ -319,26 +355,105 @@ CUBEMASTER_METRIC_LOOP=0
 
 ## 卸载
 
-停止服务：
+### 1. 停止 one-click systemd 栈
 
 ```bash
 systemctl stop cube-sandbox-control.target cube-sandbox-compute.target 2>/dev/null || true
+systemctl stop cube-sandbox-seed-cubemaster-metrics.timer 2>/dev/null || true
 ```
 
-执行包内卸载脚本：
+### 2. 执行包内卸载脚本
+
+优先使用 release 目录中的 `down.sh`，它会停止 systemd units、回滚 one-click DNS 配置、
+删除 one-click 管理的容器和默认数据卷：
 
 ```bash
 cd <one-click-release-dir>
 bash down.sh
 ```
 
-如需清理 Docker 容器：
+如果 release 目录已经删除，可直接使用已安装目录中的脚本清理 systemd units：
+
+```bash
+/usr/local/services/cubetoolbox/scripts/systemd/remove-units.sh 2>/dev/null || true
+systemctl daemon-reload
+systemctl reset-failed 2>/dev/null || true
+```
+
+### 3. 检查并清理残留容器和卷
+
+如需手动清理 Docker 容器：
 
 ```bash
 docker rm -f cube-sandbox-mysql cube-sandbox-redis cube-proxy cube-proxy-coredns cube-webui 2>/dev/null || true
 ```
 
-删除 Docker volumes 或 `/usr/local/services/cubetoolbox` 会清理数据，执行前需要确认不再需要保留。
+如确认不需要保留 MySQL/Redis 数据，再删除默认 volumes：
+
+```bash
+docker volume rm cube-sandbox-mysql-data cube-sandbox-redis-data 2>/dev/null || true
+```
+
+如果 `.env` 中自定义过容器名或卷名，需要按实际值替换上面的名称。
+
+### 4. 检查挂载点并处理 umount
+
+`cubelet` 使用 mount namespace 和 bind mount。异常退出或强制停止后，删除
+`/usr/local/services/cubetoolbox` 时可能遇到：
+
+```text
+Device or resource busy
+```
+
+先查看相关挂载：
+
+```bash
+findmnt -R /usr/local/services/cubetoolbox 2>/dev/null || true
+findmnt -R /data/cubelet 2>/dev/null || true
+```
+
+常见残留路径包括：
+
+```text
+/usr/local/services/cubetoolbox/cubeletmnt
+/usr/local/services/cubetoolbox/cubeletmnt/mnt
+```
+
+优先按从内到外的顺序正常卸载：
+
+```bash
+umount /usr/local/services/cubetoolbox/cubeletmnt/mnt 2>/dev/null || true
+umount /usr/local/services/cubetoolbox/cubeletmnt 2>/dev/null || true
+```
+
+如果仍提示 busy，先确认是否有遗留 cubelet/cube-shim 进程：
+
+```bash
+ps -ef | grep -E 'cubelet|containerd-shim-cube|cube-runtime|firecracker|qemu' | grep -v grep || true
+```
+
+确认不再需要保留这些进程后再停止对应服务或终止进程。若仍无法卸载，可使用懒卸载作为最后清理手段：
+
+```bash
+umount -l /usr/local/services/cubetoolbox/cubeletmnt/mnt 2>/dev/null || true
+umount -l /usr/local/services/cubetoolbox/cubeletmnt 2>/dev/null || true
+```
+
+不要对 `/data/cubelet` 本身执行 `umount -l`，除非确认该 XFS 挂载只用于本次 one-click
+验证且不会影响其他服务。
+
+### 5. 删除安装目录
+
+确认 systemd、容器、卷和挂载都已清理后，再删除安装目录：
+
+```bash
+rm -rf /usr/local/services/cubetoolbox
+systemctl daemon-reload
+systemctl reset-failed 2>/dev/null || true
+```
+
+删除 Docker volumes、`/usr/local/services/cubetoolbox` 或 `/data/cubelet` 下的数据会清理运行数据，
+执行前需要确认不再需要保留。
 
 ## 远端验证记录
 

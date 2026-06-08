@@ -159,17 +159,26 @@ check_early_preflight() {
       fi
     fi
 
-    # DNS check (requires resolvectl or NetworkManager loaded status)
+    # DNS check (requires resolvectl, an active dnsmasq.service, or NetworkManager loaded status)
     if ! command -v resolvectl >/dev/null 2>&1; then
       if command -v systemctl >/dev/null 2>&1; then
-        local nm_load_state
+        local dnsmasq_load_state dnsmasq_active_state dnsmasq_sockets nm_load_state
+        dnsmasq_load_state="$(systemctl show -p LoadState --value dnsmasq 2>/dev/null || true)"
+        dnsmasq_active_state="$(systemctl show -p ActiveState --value dnsmasq 2>/dev/null || true)"
+        dnsmasq_sockets="$(ss -lnup "( sport = :53 )" 2>/dev/null || true)"
+        if [[ "${dnsmasq_load_state}" == "loaded" && "${dnsmasq_active_state}" == "active" && "${dnsmasq_sockets}" == *"127.0.0.1:53"* && "${dnsmasq_sockets}" == *"dnsmasq"* ]]; then
+          echo "[online-install] DNS fallback will reuse active dnsmasq.service." >&2
+          echo "[online-install] Pre-download preflight checks passed." >&2
+          return 0
+        fi
+
         nm_load_state="$(systemctl show -p LoadState --value NetworkManager 2>/dev/null || true)"
         if [[ "${nm_load_state}" != "loaded" ]]; then
-          echo "[online-install] ERROR: DNS setup requires resolvectl or NetworkManager." >&2
+          echo "[online-install] ERROR: DNS setup requires resolvectl, an active dnsmasq.service, or NetworkManager." >&2
           exit 3
         fi
       else
-        echo "[online-install] ERROR: DNS setup requires resolvectl or systemd/NetworkManager." >&2
+        echo "[online-install] ERROR: DNS setup requires resolvectl or systemd with dnsmasq/NetworkManager." >&2
         exit 3
       fi
 

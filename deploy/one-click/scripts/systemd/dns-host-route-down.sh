@@ -13,8 +13,10 @@ require_cmd ip
 COREDNS_DIR="${TOOLBOX_ROOT}/coredns"
 DNS_MODE_FILE="${COREDNS_DIR}/host-dns-mode"
 DNS_IFACE_FILE="${COREDNS_DIR}/host-dns-interface"
+RESOLVED_COREDNS_BIND_ADDR="${CUBE_PROXY_RESOLVED_DNS_ADDR:-169.254.254.53}"
 NM_MAIN_CONF="/etc/NetworkManager/conf.d/90-cubeproxy-dns.conf"
 NM_DOMAIN_CONF="/etc/NetworkManager/dnsmasq.d/90-cubeproxy-cube-app.conf"
+SYSTEM_DNSMASQ_CONF="/etc/dnsmasq.d/90-cubeproxy-cube-app.conf"
 
 networkmanager_available() {
   command -v systemctl >/dev/null 2>&1 || return 1
@@ -37,6 +39,7 @@ is_stub_nameserver() {
   [[ "${nameserver}" == 127.* ]] && return 0
   [[ "${nameserver}" == ::1 ]] && return 0
   [[ "${nameserver}" == 0:0:0:0:0:0:0:1 ]] && return 0
+  [[ "${nameserver}" == "${RESOLVED_COREDNS_BIND_ADDR}" ]] && return 0
   return 1
 }
 
@@ -126,6 +129,16 @@ case "${mode}" in
     restore_non_stub_resolv_conf
     # The NM path now uses the same dummy link as the systemd-resolved
     # path to host dnsmasq, so tear it down here as well.
+    if [[ -n "${iface}" ]] && link_exists "${iface}" && link_is_dummy "${iface}"; then
+      ip link delete "${iface}" >/dev/null 2>&1 || true
+    fi
+    ;;
+  system-dnsmasq)
+    rm -f "${SYSTEM_DNSMASQ_CONF}" "${NM_DOMAIN_CONF}" "${NM_MAIN_CONF}"
+    restore_non_stub_resolv_conf
+    if command -v systemctl >/dev/null 2>&1 && [[ "$(systemctl show -p LoadState --value dnsmasq 2>/dev/null || true)" == "loaded" ]]; then
+      systemctl restart dnsmasq >/dev/null 2>&1 || true
+    fi
     if [[ -n "${iface}" ]] && link_exists "${iface}" && link_is_dummy "${iface}"; then
       ip link delete "${iface}" >/dev/null 2>&1 || true
     fi
