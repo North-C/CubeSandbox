@@ -454,30 +454,3 @@ systemctl reset-failed 2>/dev/null || true
 
 删除 Docker volumes、`/usr/local/services/cubetoolbox` 或 `/data/cubelet` 下的数据会清理运行数据，
 执行前需要确认不再需要保留。
-
-## 远端验证记录
-
-验证时间：2026-06-08
-
-验证机 A：
-
-- 系统架构：`aarch64`
-- `/data/cubelet`：XFS
-- release 包 SHA256 与本文记录一致
-- 包内存在 `env.example`、`install.sh`、`VERSION.txt`
-- 已验证 release tar 包不包含 `.env`，只包含 `env.example`
-- 已验证 `cp env.example .env` 后修改端口、`CUBE_API_BIND`、`WEB_UI_UPSTREAM` 等变量的流程
-- 已确认包内安装后包含离线 Docker 镜像 tar：
-  `mysql-8.0.tar`、`redis-7-alpine.tar`、`coredns-1.14.2.tar`、
-  `openresty-1.21.4.1-6-alpine-fat.tar`、`cube-proxy-one-click.tar`
-
-验证机 B：
-
-- 使用同一 optimized release 包完成安装
-- `systemctl --failed --no-pager` 为 0
-- `network-agent`、`cube-api`、`cubemaster`、`cubelet`、`mysql`、`redis`、
-  `coredns`、`cube-proxy`、`dns`、`webui` 均为 active
-- 健康检查返回：
-  - `127.0.0.1:19090/healthz`: `ok`
-  - `127.0.0.1:19090/readyz`: `ready`
-  - `127.0.0.1:<cube-api-port>/health`: `{"status":"ok","sandboxes":0}`
