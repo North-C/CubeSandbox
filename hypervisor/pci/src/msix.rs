@@ -28,8 +28,6 @@ pub const MSIX_TABLE_ENTRY_SIZE: usize = 16;
 
 #[derive(Debug)]
 pub enum Error {
-    /// Failed enabling the interrupt route.
-    EnableInterruptRoute(io::Error),
     /// Failed updating the interrupt route.
     UpdateInterruptRoute(io::Error),
 }
@@ -116,6 +114,7 @@ impl MsixConfig {
         self.enabled = state.enabled;
 
         if self.enabled && !self.masked {
+            let mut configs = Vec::new();
             for (idx, table_entry) in self.table_entries.iter().enumerate() {
                 if table_entry.masked() {
                     continue;
@@ -128,17 +127,17 @@ impl MsixConfig {
                     devid: self.devid,
                 };
 
-                self.interrupt_source_group
-                    .update(
-                        idx as InterruptIndex,
-                        InterruptSourceConfig::MsiIrq(config),
-                        self.masked,
-                    )
-                    .map_err(Error::UpdateInterruptRoute)?;
+                configs.push((
+                    idx as InterruptIndex,
+                    InterruptSourceConfig::MsiIrq(config),
+                    self.masked,
+                ));
+            }
 
+            if !configs.is_empty() {
                 self.interrupt_source_group
-                    .enable()
-                    .map_err(Error::EnableInterruptRoute)?;
+                    .update_many(&configs)
+                    .map_err(Error::UpdateInterruptRoute)?;
             }
         }
 

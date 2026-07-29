@@ -54,6 +54,11 @@ pub struct MsiMessage {
 // Device manager uses this trait without caring whether it is a
 // IOAPIC (X86) or GIC (Arm).
 pub trait InterruptController: Send {
+    #[allow(unused_variables)]
+    fn register_legacy_irq(&mut self, irq: usize) -> Result<()> {
+        Ok(())
+    }
+
     fn service_irq(&mut self, irq: usize) -> Result<()>;
     #[cfg(target_arch = "aarch64")]
     fn enable(&self) -> Result<()>;

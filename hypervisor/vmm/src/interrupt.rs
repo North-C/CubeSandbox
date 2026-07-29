@@ -138,6 +138,20 @@ impl InterruptSourceGroup for MsiInterruptGroup {
         Ok(())
     }
 
+    fn enable_selected(&self, indexes: &[InterruptIndex]) -> Result<()> {
+        for index in indexes {
+            let route = self.irq_routes.get(index).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("enable_selected: Invalid interrupt index {}", index),
+                )
+            })?;
+            route.enable(&self.vm)?;
+        }
+
+        Ok(())
+    }
+
     fn disable(&self) -> Result<()> {
         for (_, route) in self.irq_routes.iter() {
             route.disable(&self.vm)?;
@@ -190,6 +204,35 @@ impl InterruptSourceGroup for MsiInterruptGroup {
             io::ErrorKind::Other,
             format!("update: Invalid interrupt index {}", index),
         ))
+    }
+
+    fn update_many(&self, configs: &[(InterruptIndex, InterruptSourceConfig, bool)]) -> Result<()> {
+        let mut updates = Vec::with_capacity(configs.len());
+
+        for (index, config, masked) in configs {
+            let route = self.irq_routes.get(index).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("update_many: Invalid interrupt index {}", index),
+                )
+            })?;
+            let entry = RoutingEntry {
+                route: self.vm.make_routing_entry(route.gsi, config),
+                masked: *masked,
+            };
+            if *masked {
+                route.disable(&self.vm)?;
+            } else {
+                route.enable(&self.vm)?;
+            }
+            updates.push((route.gsi, entry));
+        }
+
+        let mut routes = self.gsi_msi_routes.lock().unwrap();
+        for (gsi, entry) in updates {
+            routes.insert(gsi, entry);
+        }
+        self.set_gsi_routes(&routes)
     }
 }
 
@@ -268,6 +311,17 @@ impl InterruptManager for LegacyUserspaceInterruptManager {
     type GroupConfig = LegacyIrqGroupConfig;
 
     fn create_group(&self, config: Self::GroupConfig) -> Result<Arc<dyn InterruptSourceGroup>> {
+        self.ioapic
+            .lock()
+            .unwrap()
+            .register_legacy_irq(config.irq as usize)
+            .map_err(|e| {
+                io::Error::new(
+                    io::ErrorKind::Other,
+                    format!("failed to register legacy IRQ #{}: {:?}", config.irq, e),
+                )
+            })?;
+
         Ok(Arc::new(LegacyUserspaceInterruptGroup::new(
             self.ioapic.clone(),
             config.irq,
