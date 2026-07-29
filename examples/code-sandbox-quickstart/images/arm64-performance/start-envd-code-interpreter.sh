@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+
+ENVD_PORT="${ENVD_PORT:-49983}"
+CODE_INTERPRETER_HOST="${CODE_INTERPRETER_HOST:-0.0.0.0}"
+CODE_INTERPRETER_PORT="${CODE_INTERPRETER_PORT:-49999}"
+CODE_INTERPRETER_WORKDIR="${CODE_INTERPRETER_WORKDIR:-/workspace}"
+MMDS_PRIME_UNTIL_UNIX="$(($(date +%s) + 10))"
+
+export ENVD_PORT CODE_INTERPRETER_HOST CODE_INTERPRETER_PORT CODE_INTERPRETER_WORKDIR
+
+mkdir -p "$CODE_INTERPRETER_WORKDIR" /var/log
+
+/usr/bin/envd -prime-mmds-until-unix "$MMDS_PRIME_UNTIL_UNIX" \
+    -port "$ENVD_PORT" >/var/log/envd.log 2>&1 &
+
+exec /usr/local/bin/cube-native-code-server
