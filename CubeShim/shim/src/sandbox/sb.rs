@@ -457,6 +457,8 @@ impl SandBox {
         }
 
         let storages = self.get_storages()?;
+        let needs_restore_sandbox_setup =
+            storages.iter().any(|storage| storage.driver == "virtio-fs");
         let dns = self.get_dns()?;
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
         let mut req = agent::CreateSandboxRequest {
@@ -488,7 +490,7 @@ impl SandBox {
             req.start_mode = protoc::agent::StartMode::RESTORE;
         }
 
-        {
+        if !(snapshot && self.app_snapshot_restore() && !needs_restore_sandbox_setup) {
             if self.client.is_none() {
                 errf!(self.log, "client is None in create_sandbox");
                 return Err(format!("client is None"));

@@ -36,6 +36,8 @@ use ttrpc::context::{self, Context};
 
 pub const GUEST_DEV_SHM: &str = "/run/cube-containers/sandbox/shm";
 pub const ANNO_APP_SNAPSHOT_CONTAINER_ID: &str = "cube.appsnapshot.container.id";
+const ANNO_PROPAGATION_EXEC_MNTS: &str = "cube.propagation.exec.mounts";
+const ANNO_PROPAGATION_CONTAINER_UMNTS: &str = "cube.propagation.container.umounts";
 
 fn validate_log_path_component(id: &str) -> CResult<()> {
     if id.is_empty() || id.contains('/') || id.contains("..") || id.contains('\0') {
@@ -428,6 +430,25 @@ impl Container {
 
     pub async fn create_container(&mut self) -> CResult<()> {
         let mut stat = self.new_stat(stat_defer::CALLEE_ACT_CREATE_CONTAINER.to_string());
+
+        // Restored containers already exist in the guest. The restore RPC only
+        // starts a helper that fixes propagation mounts, so avoid spawning it
+        // when this container has no propagation work to perform.
+        let needs_restore_mount_fixup = self
+            .spec
+            .annotations()
+            .as_ref()
+            .map(|annotations| {
+                annotations.contains_key(ANNO_PROPAGATION_EXEC_MNTS)
+                    || annotations.contains_key(ANNO_PROPAGATION_CONTAINER_UMNTS)
+            })
+            .unwrap_or(false);
+        if self.sb_conf.app_snapshot_restore && !needs_restore_mount_fixup {
+            self.state = Some(ContainerState::new(self.log.clone()));
+            stat.set_ok();
+            return Ok(());
+        }
+
         let req = agent::CreateContainerRequest {
             container_id: self.id.clone(),
             exec_id: self.id.clone(),
