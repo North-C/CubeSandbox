@@ -550,8 +550,12 @@ impl SandBox {
         let (tx, mut rx) = channel::<()>(1);
         let arc_conainers = self.containers.clone();
         let arc_state = self.state.clone();
-        let conn = AsyncUtils::connect_agent(&self.id).await?;
-        let client = health_ttrpc::HealthClient::new(conn);
+        let client = if check_agent {
+            let conn = AsyncUtils::connect_agent(&self.id).await?;
+            Some(health_ttrpc::HealthClient::new(conn))
+        } else {
+            None
+        };
         let log = self.log.clone();
         let handle = tokio::spawn(async move {
             let ctx = context::with_timeout(1000 * 1000 * 1000 * 5);
@@ -578,7 +582,7 @@ impl SandBox {
                     if check_agent && counter > interval && !aborted {
                         counter = 0;
 
-                        if let Err(e) = client.check(ctx.clone(), &req).await {
+                        if let Err(e) = client.as_ref().unwrap().check(ctx.clone(), &req).await {
                             infof!(log, "check agent failed:{}", e);
                             aborted = true;
                         }
