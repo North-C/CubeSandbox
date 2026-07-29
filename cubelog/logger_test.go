@@ -67,6 +67,28 @@ func TestLogger_Infof(t *testing.T) {
 	}
 }
 
+func TestStringToLevelAcceptsConfigCasing(t *testing.T) {
+	tests := []struct {
+		input string
+		want  LogLevel
+	}{
+		{input: "debug", want: DEBUG},
+		{input: "Info", want: INFO},
+		{input: " warn ", want: WARN},
+		{input: "ERROR", want: ERROR},
+		{input: "fatal", want: FATAL},
+		{input: "unknown", want: DEBUG},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := StringToLevel(tt.input); got != tt.want {
+				t.Fatalf("StringToLevel(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTraceEnds(t *testing.T) {
 	EnableLogMetric()
 	w := &noopWriter{}
