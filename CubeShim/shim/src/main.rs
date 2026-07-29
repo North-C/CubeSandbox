@@ -10,6 +10,7 @@ use containerd_shim_cube_rs::service::Service;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Write};
+use std::time::Duration;
 use tokio::runtime::Builder;
 //const SHIM_VERSION: &str = env!("GIT_COMMIT_INFO");
 //const CH_VERSION: &str = env!("CH_GIT_COMMIT_INFO");
@@ -21,7 +22,7 @@ fn main() {
         ..Default::default()
     };
 
-    let mut thread_num = 1;
+    let thread_num = 1;
     let os_args: Vec<_> = std::env::args_os().collect();
     if is_version_request(&os_args[1..]) {
         print_version();
@@ -42,12 +43,12 @@ fn main() {
         return;
     }
     if flags.action.is_empty() {
-        thread_num = 2;
         set_process();
     }
 
     let runtime = Builder::new_multi_thread()
         .worker_threads(thread_num)
+        .thread_keep_alive(Duration::from_millis(100))
         .enable_all()
         .build()
         .unwrap();

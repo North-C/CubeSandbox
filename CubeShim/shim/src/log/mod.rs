@@ -271,7 +271,7 @@ impl Log {
             .open(log_file_path.clone())
             .await
             .map_err(|e| format!("open log file failed:{} file:{:?}", e, log_file_path))?;
-        let mut log_writer = tokio::io::BufReader::new(log_file);
+        let mut log_writer = log_file;
 
         let stat_file = OpenOptions::new()
             .create(true)
@@ -280,36 +280,46 @@ impl Log {
             .open(stat_file_path.clone())
             .await
             .map_err(|e| format!("open stat file failed:{} file:{:?}", e, stat_file_path))?;
-        let mut stat_writer = tokio::io::BufReader::new(stat_file);
+        let mut stat_writer = stat_file;
 
-        //let lf = ['\n' as u8];
         while let Some(msg) = recv.recv().await {
-            match msg.0 {
-                LogType::Log => {
-                    log_writer
-                        .write_all(msg.1.as_bytes())
-                        .await
-                        .map_err(|e| format!("write log file failed:{}", e))?;
-                    //log_writer.write_all(&lf).await.map_err(|e| format!("write log file failed:{}", e));
-                    log_writer
-                        .flush()
-                        .await
-                        .map_err(|e| format!("flush log failed:{}", e))?;
-                }
-                LogType::Stat => {
-                    stat_writer
-                        .write_all(msg.1.as_bytes())
-                        .await
-                        .map_err(|e| format!("write stat file failed:{}", e))?;
-                    //stat_writer.write_all(&lf).await.map_err(|e| format!("write stat file failed:{}", e));
-                    stat_writer
-                        .flush()
-                        .await
-                        .map_err(|e| format!("flush stat failed:{}", e))?;
-                }
-                LogType::Rotate => {
-                    break;
-                }
+            let mut log_batch = String::new();
+            let mut stat_batch = String::new();
+            let mut rotate = false;
+            let mut append = |msg: (LogType, String)| match msg.0 {
+                LogType::Log => log_batch.push_str(&msg.1),
+                LogType::Stat => stat_batch.push_str(&msg.1),
+                LogType::Rotate => rotate = true,
+            };
+
+            append(msg);
+            while let Ok(msg) = recv.try_recv() {
+                append(msg);
+            }
+            drop(append);
+
+            if !log_batch.is_empty() {
+                log_writer
+                    .write_all(log_batch.as_bytes())
+                    .await
+                    .map_err(|e| format!("write log file failed:{}", e))?;
+            }
+            if !stat_batch.is_empty() {
+                stat_writer
+                    .write_all(stat_batch.as_bytes())
+                    .await
+                    .map_err(|e| format!("write stat file failed:{}", e))?;
+            }
+            if rotate {
+                log_writer
+                    .flush()
+                    .await
+                    .map_err(|e| format!("flush log failed:{}", e))?;
+                stat_writer
+                    .flush()
+                    .await
+                    .map_err(|e| format!("flush stat failed:{}", e))?;
+                break;
             }
         }
         Ok(())
