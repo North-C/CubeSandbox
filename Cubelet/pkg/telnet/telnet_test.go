@@ -258,6 +258,74 @@ func TestHttpProbeSuccess(t *testing.T) {
 	assert.False(t, bTimeout)
 }
 
+func TestHttpProbeUsesBoundedQuickStartupRetries(t *testing.T) {
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	l, err := net.Listen("tcp", "localhost:")
+	if err != nil {
+		assert.FailNow(t, err.Error())
+	}
+	defer l.Close()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(l) }()
+	defer srv.Close()
+
+	cfg := makeTestingHttpProbeConfig(testGetPort(l.Addr().String()))
+	cfg.InstanceType = "cubebox"
+	cfg.Timeout = 2 * time.Second
+	cfg.Period = 500 * time.Millisecond
+	cfg.FailureThreshold = 60
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout+time.Second)
+	defer cancel()
+	start := time.Now()
+	bTimeout, probeErr := wait(ctx, Telnet(ctx, cfg))
+
+	assert.NoError(t, probeErr)
+	assert.False(t, bTimeout)
+	assert.Equal(t, 2, attempts)
+	assert.Less(t, time.Since(start), 250*time.Millisecond)
+}
+
+func TestHttpProbeQuickRetriesDoNotConsumeFailureThreshold(t *testing.T) {
+	attempts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	l, err := net.Listen("tcp", "localhost:")
+	if err != nil {
+		assert.FailNow(t, err.Error())
+	}
+	defer l.Close()
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(l) }()
+	defer srv.Close()
+
+	cfg := makeTestingHttpProbeConfig(testGetPort(l.Addr().String()))
+	cfg.InstanceType = "cubebox"
+	cfg.Timeout = 2 * time.Second
+	cfg.Period = 75 * time.Millisecond
+	cfg.FailureThreshold = 2
+
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.Timeout+time.Second)
+	defer cancel()
+	bTimeout, probeErr := wait(ctx, Telnet(ctx, cfg))
+
+	assert.Error(t, probeErr)
+	assert.False(t, bTimeout)
+	assert.Equal(t, 4, attempts)
+}
+
 func TestHttpConnFail(t *testing.T) {
 	cfg := makeTestingHttpProbeConfig(7781)
 	mux := http.NewServeMux()

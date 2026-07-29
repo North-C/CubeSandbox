@@ -22,7 +22,9 @@ import (
 )
 
 const (
-	maxRespBodyLength = 8 * 1 << 10
+	maxRespBodyLength       = 8 * 1 << 10
+	startupQuickRetryPeriod = 25 * time.Millisecond
+	startupQuickRetryLimit  = 2
 )
 
 var (
@@ -80,6 +82,8 @@ func probe(ctx context.Context, p *ProbeConfig, retCh chan error) {
 
 	succCnt := int32(0)
 	failureCnt := int32(0)
+	quickAttempt := false
+	quickRetries := 0
 	innerCtx, cancel := context.WithTimeout(ctx, p.Timeout)
 	defer cancel()
 	var err error
@@ -117,7 +121,11 @@ func probe(ctx context.Context, p *ProbeConfig, retCh chan error) {
 				failureCnt = 0
 			} else {
 				succCnt = 0
-				failureCnt += 1
+				// Opportunistic startup checks do not consume failureThreshold.
+				// The next regular-period attempt remains the next logical failure.
+				if !quickAttempt {
+					failureCnt += 1
+				}
 			}
 			if succCnt >= p.SuccessThreshold {
 				retCh <- nil
@@ -129,7 +137,17 @@ func probe(ctx context.Context, p *ProbeConfig, retCh chan error) {
 				return
 			}
 		}
-		time.Sleep(p.Period)
+
+		delay := p.Period
+		quickAttempt = false
+		if err != nil && p.SuccessThreshold == 1 && p.FailureThreshold > 1 &&
+			(p.Action == ActionHTTPGet || p.Action == ActionTCPSocket) &&
+			quickRetries < startupQuickRetryLimit && p.Period > startupQuickRetryPeriod {
+			quickRetries++
+			quickAttempt = true
+			delay = startupQuickRetryPeriod
+		}
+		time.Sleep(delay)
 	}
 exitDetect:
 	if succCnt >= p.SuccessThreshold {
