@@ -399,12 +399,12 @@ impl SandBox {
             .map(|entry| normalize_dns_for_agent(&entry))
             .collect()
     }
-    async fn reset_guest(&mut self) -> CResult<()> {
+    async fn reset_guest(&self) -> CResult<()> {
         if self.client.is_none() {
             errf!(self.log, "client is None in reset_guest");
             return Err(format!("client is None"));
         }
-        let client = self.client.as_ref().unwrap().lock().await;
+        let client = self.client.as_ref().unwrap().lock().await.clone();
         let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_RESET_VM.to_string());
         let tm = Utc::now();
 
@@ -414,21 +414,29 @@ impl SandBox {
             ..Default::default()
         };
 
-        client
-            .set_guest_date_time(self.ctx.clone(), &req)
-            .await
-            .map_err(|e| format!("reset guest time failed:{}", e))?;
-
         let rng = Utils::get_rng()?;
-        let req = agent::ReseedRandomDevRequest {
+        let rng_req = agent::ReseedRandomDevRequest {
             data: rng,
             ..Default::default()
         };
 
-        client
-            .reseed_random_dev(self.ctx.clone(), &req)
-            .await
-            .map_err(|e| format!("reset reseed random dev failed:{}", e))?;
+        let time_client = client.clone();
+        let time_ctx = self.ctx.clone();
+        let rng_ctx = self.ctx.clone();
+        tokio::try_join!(
+            async {
+                time_client
+                    .set_guest_date_time(time_ctx, &req)
+                    .await
+                    .map_err(|e| format!("reset guest time failed:{}", e))
+            },
+            async {
+                client
+                    .reseed_random_dev(rng_ctx, &rng_req)
+                    .await
+                    .map_err(|e| format!("reset reseed random dev failed:{}", e))
+            }
+        )?;
         stat.set_ok();
         Ok(())
     }
@@ -447,10 +455,6 @@ impl SandBox {
 
         infof!(self.log, "agent is ready");
 
-        if snapshot {
-            self.reset_guest().await?;
-        }
-
         //add vfio device
         if !self.app_snapshot_restore() {
             self.add_device().await?;
@@ -460,7 +464,6 @@ impl SandBox {
         let needs_restore_sandbox_setup =
             storages.iter().any(|storage| storage.driver == "virtio-fs");
         let dns = self.get_dns()?;
-        let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
         let mut req = agent::CreateSandboxRequest {
             //hostname: self.id.clone(),
             hostname: self.id.chars().take(8).collect::<String>(),
@@ -490,17 +493,35 @@ impl SandBox {
             req.start_mode = protoc::agent::StartMode::RESTORE;
         }
 
-        if !(snapshot && self.app_snapshot_restore() && !needs_restore_sandbox_setup) {
+        if snapshot && self.app_snapshot_restore() && !needs_restore_sandbox_setup {
+            let mut stat = self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
+            stat.set_ok();
+            self.reset_guest().await?;
+        } else {
             if self.client.is_none() {
                 errf!(self.log, "client is None in create_sandbox");
                 return Err(format!("client is None"));
             }
-            let client = self.client.as_ref().unwrap().lock().await;
+            let client = self.client.as_ref().unwrap().lock().await.clone();
+            let create_sandbox = async {
+                let mut stat =
+                    self.new_create_stat(stat_defer::CALLEE_ACT_CREATE_SANDBOX.to_string());
+                client
+                    .create_sandbox(ctx, &req)
+                    .await
+                    .map_err(|e| format!("create sandbox failed:{}", e))?;
+                stat.set_ok();
+                Ok::<(), String>(())
+            };
 
-            client
-                .create_sandbox(ctx, &req)
-                .await
-                .map_err(|e| format!("create sandbox failed:{}", e))?;
+            if snapshot && self.app_snapshot_restore() {
+                tokio::try_join!(self.reset_guest(), create_sandbox)?;
+            } else {
+                if snapshot {
+                    self.reset_guest().await?;
+                }
+                create_sandbox.await?;
+            }
         }
 
         if !self.conf.app_snapshot_create {
@@ -514,7 +535,6 @@ impl SandBox {
             self.tx_monitor_exited = Some(sender);
             self.monitor_handle = Some(Arc::new(handle));
         }
-        stat.set_ok();
         Ok(())
     }
 
