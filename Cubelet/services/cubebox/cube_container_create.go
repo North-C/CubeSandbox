@@ -299,6 +299,25 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 				"containerID": ci.ID,
 				"isPod":       ci.IsPod,
 			})
+			earlyProbe := earlyProbeEnabled()
+			var (
+				earlyProbeCh     chan error
+				earlyProbeStart  time.Time
+				cancelEarlyProbe context.CancelFunc
+			)
+			if earlyProbe {
+				earlyProbeCtx, cancel := context.WithCancel(param.ctxTmp)
+				cancelEarlyProbe = cancel
+				earlyProbeStart = time.Now()
+				earlyProbeCh, err = l.startProbeWithDelay(
+					earlyProbeCtx, param.cntrReq, param.ci, earlyProbeDelay(),
+				)
+				if err != nil {
+					cancelEarlyProbe()
+					workflow.RecordCreateMetric(earlyProbeCtx, err, constants.CubeProbeId, time.Since(earlyProbeStart))
+					return err
+				}
+			}
 			err = func() (retE error) {
 				containerLog := log.G(ctx).WithField("container-id", ci.ID)
 				retE = l.runContainer(param.ctxTmp, sandBox, param.ci, param.cOpts, ociRuntime)
@@ -328,10 +347,21 @@ func (l *local) createContainers(ctx context.Context, flowOpts *workflow.CreateC
 				return retE
 			}()
 			if err != nil {
+				if cancelEarlyProbe != nil {
+					cancelEarlyProbe()
+				}
 				return fmt.Errorf("failed to run container %s: %w", param.ci.ID, err)
 			}
-			if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
-				return err
+			if earlyProbe {
+				if err := l.waitProbe(param.ctxTmp, param.ci, earlyProbeCh, earlyProbeStart); err != nil {
+					cancelEarlyProbe()
+					return err
+				}
+				cancelEarlyProbe()
+			} else {
+				if err := l.doProbe(param.ctxTmp, param.cntrReq, param.ci); err != nil {
+					return err
+				}
 			}
 			err = l.cbriManager.PostCreateContainer(ctx, sandBox, param.ci)
 			if err != nil {

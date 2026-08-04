@@ -81,17 +81,31 @@ func newEnvdHTTPClient() *http.Client {
 
 func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (retErr error) {
 	startTime := time.Now()
-	defer func() {
+	telnetCh, retErr := l.startProbe(ctx, c, ci)
+	if retErr != nil {
 		workflow.RecordCreateMetric(ctx, retErr, constants.CubeProbeId, time.Since(startTime))
-	}()
+		return retErr
+	}
+	return l.waitProbe(ctx, ci, telnetCh, startTime)
+}
 
+func (l *local) startProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cubeboxstore.Container) (chan error, error) {
+	return l.startProbeWithDelay(ctx, c, ci, 0)
+}
+
+func (l *local) startProbeWithDelay(
+	ctx context.Context,
+	c *cubebox.ContainerConfig,
+	ci *cubeboxstore.Container,
+	extraInitialDelay time.Duration,
+) (chan error, error) {
 	telnetCh := make(chan error, 1)
 	if c.GetProbe() != nil && c.GetProbe().GetProbeHandler() != nil {
 		if ci.IP == "" || ci.IP == "<nil>" {
-			return ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "invalid NetworkInfo")
+			return nil, ret.Err(errorcode.ErrorCode_CreateNetworkFailed, "invalid NetworkInfo")
 		}
 		if c.GetProbe().TimeoutMs <= 0 {
-			return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]",
+			return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe TimeoutMs[%v]",
 				c.GetProbe().TimeoutMs)
 		}
 		if c.GetProbe().PeriodMs <= 2 {
@@ -102,7 +116,7 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 		}
 		cfg := &telnet.ProbeConfig{
 			Addr:             ci.IP,
-			InitialDelay:     time.Duration(c.GetProbe().InitialDelayMs) * time.Millisecond,
+			InitialDelay:     time.Duration(c.GetProbe().InitialDelayMs)*time.Millisecond + extraInitialDelay,
 			Timeout:          time.Duration(c.GetProbe().TimeoutMs) * time.Millisecond,
 			Period:           time.Duration(c.GetProbe().PeriodMs) * time.Millisecond,
 			SuccessThreshold: c.GetProbe().SuccessThreshold,
@@ -123,7 +137,7 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 			cfg.Action = telnet.ActionTCPSocket
 			cfg.Port = tcp.GetPort()
 			if cfg.Port <= 0 {
-				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe port[%v]", cfg.Port)
+				return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid probe port[%v]", cfg.Port)
 			}
 		} else if ping := handler.GetPing(); ping != nil {
 			cfg.Action = telnet.ActionPing
@@ -133,11 +147,11 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 			cfg.Port = httpGet.GetPort()
 			req, err := NewRequestForHTTPGetAction(ctx, httpGet, cfg.Addr)
 			if err != nil {
-				return ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid http probe[%d]:%v", cfg.Port, err)
+				return nil, ret.Errorf(errorcode.ErrorCode_InvalidParamFormat, "invalid http probe[%d]:%v", cfg.Port, err)
 			}
 			cfg.HttpGetRequest = req
 		} else {
-			return ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
+			return nil, ret.Err(errorcode.ErrorCode_InvalidParamFormat, "invalid probe cfg")
 		}
 
 		log.G(ctx).Debugf("probe [%s] start:%s", ci.IP, utils.InterfaceToString(cfg))
@@ -145,6 +159,14 @@ func (l *local) doProbe(ctx context.Context, c *cubebox.ContainerConfig, ci *cub
 	} else {
 		telnetCh <- nil
 	}
+	return telnetCh, nil
+}
+
+func (l *local) waitProbe(ctx context.Context, ci *cubeboxstore.Container, telnetCh chan error, startTime time.Time) (retErr error) {
+	defer func() {
+		workflow.RecordCreateMetric(ctx, retErr, constants.CubeProbeId, time.Since(startTime))
+	}()
+
 	select {
 	case telnetRet := <-telnetCh:
 		if telnetRet != nil {
