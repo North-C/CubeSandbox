@@ -509,7 +509,8 @@ impl Container {
     }
 
     /// Spawn a background task that streams container stdout/stderr from the
-    /// agent (via a fresh vsock connection) and appends them to log files.
+    /// agent and appends them to log files. Snapshot restores reuse the live
+    /// control connection; cold starts use a dedicated vsock connection.
     /// Template creation writes to `/data/log/template/<id>/stdout|stderr`;
     /// normal sandbox restore writes to `./stdout` and `./stderr` relative
     /// to the shim's current working directory (the bundle directory).
@@ -535,12 +536,23 @@ impl Container {
             }
         }
 
-        // Open a dedicated vsock connection for streaming I/O so that the
-        // main client connection used for control-plane RPCs is never blocked.
-        let log_conn = AsyncUtils::connect_agent(&self.sandbox_id)
-            .await
-            .map_err(|e| format!("connect agent for log forwarding failed:{}", e))?;
-        let log_client = agent_ttrpc::AgentServiceClient::new(log_conn);
+        // A restored sandbox already has a live agent connection. Reuse it so
+        // task start does not wait for a second vsock handshake while the VM is
+        // resuming. Cold starts keep the dedicated log connection because the
+        // init process has not started yet and its control path must stay free.
+        let log_client = if self.sb_conf.app_snapshot_restore {
+            self.client
+                .as_ref()
+                .ok_or_else(|| "agent client is unavailable for log forwarding".to_string())?
+                .lock()
+                .await
+                .clone()
+        } else {
+            let log_conn = AsyncUtils::connect_agent(&self.sandbox_id)
+                .await
+                .map_err(|e| format!("connect agent for log forwarding failed:{}", e))?;
+            agent_ttrpc::AgentServiceClient::new(log_conn)
+        };
 
         // Write log files:
         //   - template creation: /data/log/template/<id>/stdout|stderr
