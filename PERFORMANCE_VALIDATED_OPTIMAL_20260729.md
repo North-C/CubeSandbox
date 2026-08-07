@@ -1,6 +1,8 @@
 # CubeSandbox 已验证最优源码清单
 
-日期：2026-07-29
+创建日期：2026-07-29
+
+更新日期：2026-08-07
 
 ## 1. 仓库口径
 
@@ -10,9 +12,11 @@
 - OCI 基线：`cubesandbox-bench/sandbox-code-envd-ci:arm64-slim`
 - 正式状态：cross-stage early probe 关闭；保留标准 Template Probe
 
-本分支只汇总已经完成成功率、性能或功能门禁的修改。源码提交来自
-v0.5.1 同机 A/B 和后续 `.90` OCI/Template 实验；没有把仅在失败样本上
-变快、导致 reset timeout、破坏 `run_code` 或破坏 Snapshot clone 的候选纳入。
+本分支汇总完成成功率、性能或功能门禁并决定保留的修改。源码提交来自 v0.5.1
+同机 A/B 和后续 `.90` OCI/Template 实验。2026-08-07 追加的日志连接复用已经
+通过后续 create-only、串行执行和 c20/n100 执行正确性门禁，但共享连接的并发
+执行尾延迟仍需在最终组合回归中继续验证；其余仅在失败样本上变快、导致 reset
+timeout 或破坏 Snapshot clone 的候选仍未纳入。
 
 ## 2. 保留的提交
 
@@ -28,6 +32,7 @@ v0.5.1 同机 A/B 和后续 `.90` OCI/Template 实验；没有把仅在失败样
 | `a8ee9c7` | envd Snapshot-only MMDS-prime | 保留 Template 构建/reset 稳定性所需活动，restore 后停止无效 MMDS 轮询 |
 | `51d36b0` | native code server v3 | 49999 监听前等待 envd，Template 保存 ready cache，保持 NDJSON execute 协议 |
 | `b7d9402` | ARM64 OCI 多阶段源码构建 | 锁定 base digest、envd commit 和 Go 1.26.2，不提交预编译二进制 |
+| `2aca144` | restore 复用 guest-agent 连接转发 init 日志 | 避免 `task.Start` 同步建立第二条 vsock 连接；冷启动仍使用专用连接 |
 
 ## 3. 已验证数据
 
@@ -80,6 +85,17 @@ early probe 关闭后的 benchmark 合计 2520/2520，无 HTTP 408、
 `reset guest time failed` 或残留资源。真实 SDK create 后立即 `run_code` 另有
 3/3 通过，stdout/result 分别为 `12345`/`42`。
 
+### 3.4 日志连接复用与空 RPC 跳过
+
+后续部署二进制同时包含日志连接复用和空 `CreateContainer` RPC 跳过。三轮
+c50/n500 共 1500/1500 成功，avg latency 均值 78.599 ms、p95 均值
+136.724 ms、平均吞吐 502.93/s。`task.Start - sandbox-create` avg 从
+35.28 ms 降至 0.95 ms，p95 从 196.23 ms 降至 2.57 ms。
+
+串行 create 后立即执行代码为 10/10，c20/n100 为 100/100，结果均正确；并发
+`run_code` 仍观察到约 0.1-6.1 秒波动。该数据来自部署阶段组合，不是当前分支
+最终头的单项 A/B，因此不能把全部收益归因于日志连接复用。
+
 ## 4. 明确排除的候选
 
 - cross-stage early probe：平均 c50 仅再改善 3.22%，已按要求回退；这里保留的
@@ -87,8 +103,6 @@ early probe 关闭后的 benchmark 合计 2520/2520，无 HTTP 408、
 - GICv4、vtimer IRQ bypass、`nohlt`：收益不足或造成宿主机失联/创建失败；
   `b3301f8` 只是 VMM 内部路由批处理，不开启这些内核参数。
 - `maxcpus=1`：可规避部分失败但牺牲 2U/3U/4U Template 语义。
-- 复用 guest-agent 控制连接转发 init 日志：c50 很快，但高并发 `run_code`
-  出现秒级延迟和超时。
 - 延迟异步专用日志连接：避免了上述控制连接争用，但动态 Snapshot clone
   出现 GICv3 ITS restore `EINVAL`。
 - 社区 guest image：多轮出现 `reset guest time failed`；正式运行仍要求已验证的
@@ -105,7 +119,12 @@ openEuler guest kernel、guest image、1000 TAP 池、CubeSandbox 服务配置�
 Template/Snapshot 数据属于部署产物，不应提交进源码仓库。更换任一 guest/OCI
 层后必须重新构建 Template，旧 Template 不会自动继承新文件。
 
-本分支是“各项已验证修改的源码汇总”。核心源码组合和 OCI v3 分别有上述远端
-压力数据；新分支的精确最终 commit 尚未重新部署执行一次全矩阵，因此后续发布前
-仍应在 `.90` 以同一资源清理门禁做一次组合回归，不能把不同阶段数据误写成一次
-相同二进制的测试结果。
+本分支是“各项保留修改的源码汇总”。核心源码组合、OCI v3 和日志连接复用组合
+分别有上述远端压力数据；加入 `2aca144` 后的精确最终源码头尚未重新部署执行一次
+全矩阵，因此后续发布前仍应在 `.90` 以同一资源清理门禁做一次组合回归，不能把
+不同阶段数据误写成一次相同二进制的测试结果。连接复用使 init 日志流和后续控制
+RPC 共享底层 ttrpc/vsock 连接，发布门禁必须覆盖 c50 create-only、并发
+`run_code` 和动态 Snapshot clone。
+
+逐项上下文、实现方法和验证边界见
+[`TEMPLATE_CONCURRENT_CREATE_OPTIMIZATION_GUIDE.md`](TEMPLATE_CONCURRENT_CREATE_OPTIMIZATION_GUIDE.md)。
