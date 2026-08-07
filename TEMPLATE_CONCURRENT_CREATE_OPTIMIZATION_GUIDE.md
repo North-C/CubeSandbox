@@ -277,9 +277,63 @@ TAP 进入 guest，并继续放大为 envd health 请求。并发 restore 时，
 - `POST /execute` 保留 `application/x-ndjson` 协议，每个请求仍启动独立 Python
   子进程，并保留 timeout、env vars、stdout、result、stderr 和 error 事件语义。
 
-v3 保证的是“Template 创建时 envd 曾经健康”，不是持续 liveness。envd 在 ready
-后崩溃时，缓存不会自动回退。若要增强生产期监控，应使用低频后台 revalidation 或
-进程联动退出，不能恢复成每次高频 Probe 都同步查询 envd。
+### 已知边界
+
+1. **`envdReady` 是单向 readiness 缓存，不是持续 liveness。**
+
+   envd 第一次返回 2xx 后，`atomic.Bool envdReady` 永久保持 true。Template 捕获并
+   restore 这个内存状态后，`/health` 不再访问 envd。如果 envd 在 ready 后退出或
+   失效，49999 仍会返回 200。若要增强生产期监控，应采用低频后台 revalidation、
+   supervisor 联动退出或让 envd 退出时终止前台 server，不能恢复为每个高频 Cubelet
+   Probe 都同步查询 envd，否则会重新引入本次消除的并发热点。
+
+2. **`POST /execute` 本身不重新执行 envd readiness 门禁。**
+
+   正式启动路径默认在监听 49999 前等待 envd，因此正常 Template 中该前提已经成立。
+   但如果设置 `CUBE_WAIT_ENVD_BEFORE_LISTEN=0`，server 会立即监听；此时 `/health`
+   在 envd 未就绪时返回 503，而 `/execute` 不会主动阻止请求。关闭 pre-listen gate
+   后，调用方必须先通过 health 检查再发送 execute。
+
+3. **NDJSON 是响应格式，不代表 stdout 实时流式传输。**
+
+   当前实现使用 `bytes.Buffer` 收集完整 stdout/stderr，等待 Python 子进程退出后才把
+   event 写入 HTTP 响应。长任务无法实时看到输出；用户程序产生大量输出时，server
+   的内存占用会随输出增长。请求体限制为 16 MiB，但当前没有独立的 stdout/stderr
+   大小上限。
+
+4. **没有 server 级并发和资源限制。**
+
+   每个 `/execute` 请求都会启动一个新的 Python 进程。Go HTTP server 可以并发处理
+   多个请求，但代码没有 semaphore、队列、最大并发数或 per-request CPU/内存限制。
+   实际约束依赖 OCI cgroup、guest 资源和 MicroVM 规格；突发请求可能造成 Python
+   进程风暴、内存压力和调度长尾。
+
+5. **native code server 不是安全隔离边界。**
+
+   用户代码能够读取传入的环境变量，并以 `/workspace` 或
+   `CODE_INTERPRETER_WORKDIR` 为当前目录访问容器文件系统。安全边界仍由 OCI
+   container、guest OS 和 MicroVM 提供。server 没有自行实现 syscall、文件、网络
+   或凭据隔离，不能脱离 CubeSandbox 隔离环境直接暴露给不可信请求。
+
+6. **每次执行使用新 Python namespace，但工作目录是共享的。**
+
+   runner 和用户源码写入独立的 `/tmp/cube-execute-*` 并在请求结束后删除，每次请求
+   都启动新的 Python 解释器，因此不会保留上一次执行的内存变量。与此同时，Python
+   子进程的当前目录默认都是 `/workspace`；并发请求读写相同业务文件时仍可能互相
+   影响，需要由调用方或上层执行协议处理文件级隔离。
+
+7. **执行超时和错误通过应用协议表达。**
+
+   `timeout` 默认 60 秒、最小 1 秒，超时通过 `exec.CommandContext` 终止 Python
+   进程并返回 `TimeoutExpired` event。Python exception、stderr 和非零退出也转换为
+   NDJSON event。除畸形请求 JSON 返回 HTTP 400 外，代码执行失败通常仍是 HTTP 200，
+   SDK 必须读取 `error` event，不能只依据 HTTP 状态判断执行成功。
+
+8. **健康缓存收益依赖正确的 Template 捕获时机。**
+
+   只有在 envd 已健康、native server 已将 `envdReady` 设为 true 且 49999 已监听后
+   创建的 Template，restore 才能直接利用缓存。更换 OCI、启动脚本或绕过 readiness
+   门禁后必须重新构建并验证 Template，不能假设旧快照自动具备 v3 状态机。
 
 ## 13. ARM64 OCI 可复现构建
 
@@ -412,6 +466,10 @@ c20/n100 功能门禁全部正确，但并发执行耗时仍有约 0.1-6.1 秒�
 6. Pause/Resume 和动态 Snapshot clone，检查 GIC/ITS restore。
 7. 每轮前后确认 sandbox、shim、task 为 0，TAP 总数和 in-use 数符合门禁。
 8. 日志中不存在 HTTP 408、`reset guest time failed`、guest timeout、残留 shim。
+9. native code server 分别验证 envd 启动失败、ready 后退出以及
+   `CUBE_WAIT_ENVD_BEFORE_LISTEN=0`，确认 readiness 与 liveness 语义符合预期。
+10. `/execute` 验证 timeout、Python exception、非零退出、大 stdout/stderr 和多请求
+    并发，记录 guest 内存、进程数和尾延迟。
 
 ## 18. 相关源码
 
