@@ -1,0 +1,92 @@
+diff --git a/packages/envd/main.go b/packages/envd/main.go
+--- a/packages/envd/main.go
++++ b/packages/envd/main.go
+@@ -53,10 +53,11 @@ var (
+ 	isNotFC bool
+ 	port    int64
+ 
+-	versionFlag  bool
+-	commitFlag   bool
+-	startCmdFlag string
+-	cgroupRoot   string
++	versionFlag        bool
++	commitFlag         bool
++	startCmdFlag       string
++	cgroupRoot         string
++	primeMMDSUntilUnix int64
+ )
+ 
+ func parseFlags() {
+@@ -102,6 +103,13 @@ func parseFlags() {
+ 		"cgroup root directory",
+ 	)
+ 
++	flag.Int64Var(
++		&primeMMDSUntilUnix,
++		"prime-mmds-until-unix",
++		0,
++		"poll Firecracker MMDS until this Unix timestamp, then disable MMDS",
++	)
++
+ 	flag.Parse()
+ }
+ 
+@@ -163,7 +171,26 @@ func main() {
+ 
+ 	mmdsChan := make(chan *host.MMDSOpts, 1)
+ 	defer close(mmdsChan)
+-	if !isNotFC {
++	noMMDSAPI := isNotFC || primeMMDSUntilUnix > 0
++	if primeMMDSUntilUnix > 0 {
++		mmdsCtx, stopMMDS := context.WithCancel(ctx)
++		go func() {
++			ticker := time.NewTicker(50 * time.Millisecond)
++			defer ticker.Stop()
++			for {
++				select {
++				case <-ctx.Done():
++					return
++				case <-ticker.C:
++					if time.Now().Unix() >= primeMMDSUntilUnix {
++						stopMMDS()
++						return
++					}
++				}
++			}
++		}()
++		go host.PollForMMDSOpts(mmdsCtx, mmdsChan, defaults.EnvVars)
++	} else if !isNotFC {
+ 		go host.PollForMMDSOpts(ctx, mmdsChan, defaults.EnvVars)
+ 	}
+ 
+@@ -186,7 +213,7 @@ func main() {
+ 	processLogger := l.With().Str("logger", "process").Logger()
+ 	processService := processRpc.Handle(m, &processLogger, defaults, cgroupManager)
+ 
+-	service := api.New(&envLogger, defaults, mmdsChan, isNotFC)
++	service := api.New(&envLogger, defaults, mmdsChan, noMMDSAPI)
+ 	handler := api.HandlerFromMux(service, m)
+ 	middleware := authn.NewMiddleware(permissions.AuthenticateUsername)
+ 
+diff --git a/packages/envd/internal/api/init.go b/packages/envd/internal/api/init.go
+--- a/packages/envd/internal/api/init.go
++++ b/packages/envd/internal/api/init.go
+@@ -151,11 +151,13 @@ func (a *API) PostInit(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 	}
+ 
+-	go func() { //nolint:contextcheck // TODO: fix this later
+-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+-		defer cancel()
+-		host.PollForMMDSOpts(ctx, a.mmdsChan, a.defaults.EnvVars)
+-	}()
++	if !a.isNotFC {
++		go func() { //nolint:contextcheck // TODO: fix this later
++			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
++			defer cancel()
++			host.PollForMMDSOpts(ctx, a.mmdsChan, a.defaults.EnvVars)
++		}()
++	}
+ 
+ 	w.Header().Set("Cache-Control", "no-store")
+ 	w.Header().Set("Content-Type", "")
