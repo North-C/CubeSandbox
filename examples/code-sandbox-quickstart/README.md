@@ -256,6 +256,13 @@ requests.get(url)
 requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
+### Audited envd image build
+
+The complete, revision-pinned envd MMDS-prime source and amd64/arm64 image build
+delivery lives in [`images/envd-mmds-prime/`](images/envd-mmds-prime/README.md).
+It is a build input and verification workflow; it does not publish an image or
+change an existing Template.
+
 ## 5. Troubleshooting
 
 | Symptom | Likely Cause | Fix |
@@ -284,6 +291,7 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # Outbound CIDR allowlist
 ├── network_denylist.py        # Outbound CIDR denylist
 ├── restrict_public_access.py  # Token-gated public URL access
+├── images/envd-mmds-prime/    # Audited envd source and image build
 ├── requirements.txt           # Python dependencies
 └── .env.example               # Environment variable template
 ```

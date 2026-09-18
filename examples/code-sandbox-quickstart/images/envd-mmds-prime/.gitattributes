@@ -1,0 +1,4 @@
+# Preserve fixed upstream bytes and patch context verbatim. Whitespace checks
+# remain enabled for every authored build script and document outside these data paths.
+source/** -whitespace
+patches/*.patch -whitespace

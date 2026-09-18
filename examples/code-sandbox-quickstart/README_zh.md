@@ -248,6 +248,12 @@ requests.get(url)
 requests.get(url, headers={"e2b-traffic-access-token": sandbox.traffic_access_token})
 ```
 
+### 可审计的 envd 镜像构建
+
+完整、固定 revision 的 envd MMDS-prime 源码与 amd64/arm64 镜像构建交付位于
+[`images/envd-mmds-prime/`](images/envd-mmds-prime/README_zh.md)。该目录只提供构建
+输入与验证流程，不发布镜像，也不修改已有 Template。
+
 ## 5. 常见问题
 
 | 现象 | 可能原因 | 解决方法 |
@@ -276,6 +282,7 @@ code-sandbox-quickstart/
 ├── network_allowlist.py       # 出口 CIDR 白名单
 ├── network_denylist.py        # 出口 CIDR 黑名单
 ├── restrict_public_access.py  # 公网 URL 鉴权 token
+├── images/envd-mmds-prime/    # 可审计的 envd 源码与镜像构建
 ├── requirements.txt           # Python 依赖
 └── .env.example               # 环境变量模板
 ```
