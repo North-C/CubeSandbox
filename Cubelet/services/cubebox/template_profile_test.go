@@ -132,7 +132,7 @@ func TestParsePagesetCollectsPresentAndWritten(t *testing.T) {
 	raw := pagemapFixture(entries, 8)
 	pm := bytes.NewReader(raw)
 
-	present, written, err := parsePageset(context.Background(), mapsData, pm, testMemoryDev, pageSize)
+	sets, err := parsePageset(context.Background(), mapsData, pm, testMemoryDev, pageSize)
 	if err != nil {
 		t.Fatalf("parsePageset: %v", err)
 	}
@@ -146,8 +146,35 @@ func TestParsePagesetCollectsPresentAndWritten(t *testing.T) {
 		8: {}, // COWed private copy
 		9: {}, // swapped out (vaddr page 5 -> file page 8+1)
 	}
-	assertPageSet(t, "present", present, wantPresent)
-	assertPageSet(t, "written", written, wantWritten)
+	if !sets.softDirty {
+		t.Fatal("softDirty: got false, want true")
+	}
+	assertPageSet(t, "present", sets.present, wantPresent)
+	assertPageSet(t, "written", sets.written, wantWritten)
+}
+
+func TestParsePagesetFallsBackToPrivateAnonWithoutSoftDirty(t *testing.T) {
+	const pageSize = uint64(4096)
+	mapsData := "00001000-00005000 rw-p 00000000 08:01 123 " + testMemoryDev + "\n"
+
+	// No entry carries bit 55, as on a kernel without CONFIG_MEM_SOFT_DIRTY.
+	entries := map[uint64]uint64{
+		1: pagemapPresentBit | pagemapFileAnonBit, // read-faulted file page
+		2: pagemapPresentBit,                      // COWed private copy
+		3: pagemapSwappedBit,                      // swapped out
+		4: 0,                                      // not resident
+	}
+	pm := bytes.NewReader(pagemapFixture(entries, 5))
+
+	sets, err := parsePageset(context.Background(), mapsData, pm, testMemoryDev, pageSize)
+	if err != nil {
+		t.Fatalf("parsePageset: %v", err)
+	}
+	if sets.softDirty {
+		t.Fatal("softDirty: got true, want false")
+	}
+	assertPageSet(t, "present", sets.present, map[uint64]struct{}{0: {}, 1: {}})
+	assertPageSet(t, "written", sets.written, map[uint64]struct{}{1: {}, 2: {}})
 }
 
 func assertPageSet(t *testing.T, name string, got, want map[uint64]struct{}) {
