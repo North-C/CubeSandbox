@@ -24,7 +24,11 @@ package cubebox
 // swapped ones) are unioned across the rounds into written_extents, which
 // the VMM uses at fast-restore time to pre-COW (MADV_POPULATE_WRITE) the
 // pages the restored guest is known to write, sparing the vCPU-path
-// stage-2 fault and TLB invalidation of a read-then-write COW.
+// stage-2 fault and TLB invalidation of a read-then-write COW. On kernels
+// without CONFIG_MEM_SOFT_DIRTY bit 55 is never set; the written set then
+// falls back to the private-anonymous pages alone (bit 61 clear): the
+// snapshot is mapped MAP_PRIVATE by a VMM process started for the restore,
+// so such a page is a copy COWed since the mapping was created.
 //
 // The phase is strictly optional and fail-open: any error — including the
 // overall budget running out — is returned to the caller, which logs a
@@ -151,8 +155,8 @@ func (s *service) runTemplateProfilePhase(
 		return err
 	}
 	// The written set is advisory on top of the hotset: an empty one is
-	// normal (VMM without the soft-dirty baseline, kernel without
-	// CONFIG_MEM_SOFT_DIRTY) and a cap violation drops only the written
+	// normal (VMM without the soft-dirty baseline, guest wrote nothing
+	// before ready) and a cap violation drops only the written
 	// extents, keeping the profile usable for prewarm.
 	writtenPages := unionPageSets(writtens)
 	writtenExtents, writtenBytes := mergeHotExtents(writtenPages, extentCoalescePages, memFileSize)
@@ -173,10 +177,13 @@ func (s *service) runTemplateProfilePhase(
 
 // roundPageSets is one verification round's page sets: present pages
 // (hotset candidates) and pages the guest wrote since the VMM armed
-// soft-dirty tracking at restore time (pre-COW candidates).
+// soft-dirty tracking at restore time (pre-COW candidates). softDirty
+// reports whether any page carried bit 55; when none did, written holds
+// the bit-61 fallback (all private anonymous pages).
 type roundPageSets struct {
-	present map[uint64]struct{}
-	written map[uint64]struct{}
+	present   map[uint64]struct{}
+	written   map[uint64]struct{}
+	softDirty bool
 }
 
 // profileVerificationRound starts one verification sandbox from the new
@@ -317,13 +324,17 @@ func (s *service) collectVerificationPageset(
 		return roundPageSets{}, fmt.Errorf("no process maps %s for sandbox %s", memoryDevPath, sandboxID)
 	}
 
-	present, written, err := collectPageset(ctx, pid, memoryDevPath)
+	sets, err := collectPageset(ctx, pid, memoryDevPath)
 	if err != nil {
 		return roundPageSets{}, fmt.Errorf("collect pagemap of pid %d: %w", pid, err)
 	}
-	stepLog.Infof("collected %d present / %d written pages from pid %d (%s)",
-		len(present), len(written), pid, memoryDevPath)
-	return roundPageSets{present: present, written: written}, nil
+	writtenRule := "soft-dirty"
+	if !sets.softDirty {
+		writtenRule = "private-anon fallback, no soft-dirty"
+	}
+	stepLog.Infof("collected %d present / %d written (%s) pages from pid %d (%s)",
+		len(sets.present), len(sets.written), writtenRule, pid, memoryDevPath)
+	return sets, nil
 }
 
 // mapsDevT is the identity of the memory volume in the terms
@@ -485,17 +496,17 @@ func parseMapsLine(line, memoryDevPath string, ident mapsDevT, identKnown bool) 
 }
 
 // collectPageset reads /proc/<pid>/maps + pagemap and returns the present
-// pages (hotset candidates) and the soft-dirty written pages (pre-COW
-// candidates), as page numbers in memory-file page units, among the
-// process's mappings of memoryDevPath.
-func collectPageset(ctx context.Context, pid int, memoryDevPath string) (map[uint64]struct{}, map[uint64]struct{}, error) {
+// pages (hotset candidates) and the written pages (pre-COW candidates), as
+// page numbers in memory-file page units, among the process's mappings of
+// memoryDevPath.
+func collectPageset(ctx context.Context, pid int, memoryDevPath string) (roundPageSets, error) {
 	mapsData, err := os.ReadFile(fmt.Sprintf("/proc/%d/maps", pid))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read maps: %w", err)
+		return roundPageSets{}, fmt.Errorf("read maps: %w", err)
 	}
 	pagemap, err := os.Open(fmt.Sprintf("/proc/%d/pagemap", pid)) // NOCC:Path Traversal()
 	if err != nil {
-		return nil, nil, fmt.Errorf("open pagemap: %w", err)
+		return roundPageSets{}, fmt.Errorf("open pagemap: %w", err)
 	}
 	defer pagemap.Close()
 	return parsePageset(ctx, string(mapsData), pagemap, memoryDevPath, uint64(os.Getpagesize()))
@@ -514,15 +525,21 @@ const (
 // pagemap bits for their vaddr ranges in one pass. Present pages go to the
 // hotset candidate set; pages marked soft-dirty since the VMM armed tracking
 // at restore time go to the written set when they are private anonymous
-// (bit 61 clear — a COWed copy), plus swapped ones. Split from collectPageset
+// (bit 61 clear — a COWed copy), plus swapped ones. If no page carries
+// soft-dirty (kernel without CONFIG_MEM_SOFT_DIRTY), the written set is
+// every private anonymous page plus swapped ones. Split from collectPageset
 // for fixture-driven unit tests.
-func parsePageset(ctx context.Context, mapsData string, pagemap io.ReadSeeker, memoryDevPath string, pageSize uint64) (map[uint64]struct{}, map[uint64]struct{}, error) {
+func parsePageset(ctx context.Context, mapsData string, pagemap io.ReadSeeker, memoryDevPath string, pageSize uint64) (roundPageSets, error) {
 	ident, identKnown := resolveMapsDev(memoryDevPath)
 	present := map[uint64]struct{}{}
 	written := map[uint64]struct{}{}
+	// privateWritten ignores bit 55; it is the written set when no page
+	// carries soft-dirty.
+	privateWritten := map[uint64]struct{}{}
+	softDirty := false
 	for _, line := range strings.Split(mapsData, "\n") {
 		if err := ctx.Err(); err != nil {
-			return nil, nil, fmt.Errorf("pagemap collection cancelled: %w", err)
+			return roundPageSets{}, fmt.Errorf("pagemap collection cancelled: %w", err)
 		}
 		m, ok := parseMapsLine(line, memoryDevPath, ident, identKnown)
 		if !ok {
@@ -536,10 +553,10 @@ func parsePageset(ctx context.Context, mapsData string, pagemap io.ReadSeeker, m
 		count := endPage - startPage
 		raw := make([]byte, count*8)
 		if _, err := pagemap.Seek(int64(startPage*8), 0); err != nil {
-			return nil, nil, fmt.Errorf("seek pagemap: %w", err)
+			return roundPageSets{}, fmt.Errorf("seek pagemap: %w", err)
 		}
 		if _, err := io.ReadFull(pagemap, raw); err != nil {
-			return nil, nil, fmt.Errorf("read pagemap: %w", err)
+			return roundPageSets{}, fmt.Errorf("read pagemap: %w", err)
 		}
 		for i := 0; i < len(raw); i += 8 {
 			entry := binary.LittleEndian.Uint64(raw[i:])
@@ -553,19 +570,29 @@ func parsePageset(ctx context.Context, mapsData string, pagemap io.ReadSeeker, m
 			// must not enter the hotset.
 			if entry&pagemapPresentBit != 0 {
 				present[page] = struct{}{}
+				if entry&pagemapSoftDirtyBit != 0 {
+					softDirty = true
+				}
 			}
 			// Written: soft-dirty since the VMM armed tracking at restore,
 			// restricted to private anonymous pages (bit 61 clear) so read
 			// faults and fault-around on the shared file mapping cannot leak
 			// into the written set; a swapped-out page was written before it
 			// was swapped out.
-			if (entry&pagemapPresentBit != 0 && entry&pagemapSoftDirtyBit != 0 && entry&pagemapFileAnonBit == 0) ||
-				entry&pagemapSwappedBit != 0 {
+			private := entry&pagemapPresentBit != 0 && entry&pagemapFileAnonBit == 0
+			swapped := entry&pagemapSwappedBit != 0
+			if (private && entry&pagemapSoftDirtyBit != 0) || swapped {
 				written[page] = struct{}{}
+			}
+			if private || swapped {
+				privateWritten[page] = struct{}{}
 			}
 		}
 	}
-	return present, written, nil
+	if !softDirty {
+		written = privateWritten
+	}
+	return roundPageSets{present: present, written: written, softDirty: softDirty}, nil
 }
 
 // intersectPageSets keeps only pages present in every round.
